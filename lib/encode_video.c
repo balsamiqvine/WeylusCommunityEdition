@@ -22,6 +22,9 @@
 #include "log.h"
 
 #ifdef HAS_VAAPI
+#include <fcntl.h>
+#include <unistd.h>
+#include <libavutil/hwcontext_drm.h>
 #include <libavutil/hwcontext_vaapi.h>
 #include <va/va.h>
 #endif
@@ -46,6 +49,21 @@ typedef struct Scalers
 	AVFrame* frame_out;
 } Scalers;
 
+// Zero-copy input: frames arrive as DMA-BUF handles (e.g. from PipeWire) and are imported
+// straight into VAAPI surfaces, converted and encoded on the GPU without touching the CPU.
+typedef struct DrmContext
+{
+	AVBufferRef* drm_device;
+	AVBufferRef* drm_frames;   // describes the incoming DRM_PRIME frames
+	AVBufferRef* vaapi_frames; // VAAPI frames context the DMA-BUFs get mapped into (RGB)
+	ScaleContext scale;        // scale_vaapi: RGB -> NV12 at the output size
+	uint32_t fourcc;
+	uint64_t modifier;
+	int width;
+	int height;
+	int initialized;
+} DrmContext;
+
 typedef struct VideoContext
 {
 	AVFormatContext* oc;
@@ -55,6 +73,7 @@ typedef struct VideoContext
 	AVFrame* frame;
 
 	Scalers scalers;
+	DrmContext drm;
 
 	AVBufferRef* hw_device_ctx;
 
@@ -69,6 +88,8 @@ typedef struct VideoContext
 	int pts;
 	int initialized;
 	int frame_allocated;
+	int gop_size; // frames between keyframes
+	int qp;       // quantizer (lower = better quality, more bits); 23 by default
 	int try_vaapi;
 	int try_nvenc;
 	int try_videotoolbox;
@@ -139,7 +160,14 @@ void set_codec_params(VideoContext* ctx)
 	ctx->c->time_base = TIME_BASE;
 	ctx->c->framerate = (AVRational){0, 1};
 
-	ctx->c->gop_size = 12;
+	ctx->c->gop_size = ctx->gop_size;
+	// Describe the colours explicitly. Without this the stream inherits "RGB" from the captured
+	// frames and decoders have to guess. Full range because e.g. the i965 VAAPI converter always
+	// produces full-range output, and every other path is configured to match.
+	ctx->c->colorspace = AVCOL_SPC_BT709;
+	ctx->c->color_primaries = AVCOL_PRI_BT709;
+	ctx->c->color_trc = AVCOL_TRC_BT709;
+	ctx->c->color_range = AVCOL_RANGE_JPEG;
 	// no B-frames to reduce latency
 	ctx->c->max_b_frames = 0;
 	if (ctx->oc->oformat->flags & AVFMT_GLOBALHEADER)
@@ -164,6 +192,7 @@ void init_scaler(
 	AVBufferRef* hw_device_ctx,
 	enum AVPixelFormat pix_fmt_sw_out,
 	AVFrame* frame_out,
+	int vaapi_sw_convert,
 	Error* err)
 {
 	int ret = 0;
@@ -293,40 +322,86 @@ void init_scaler(
 		}
 		break;
 	case AV_PIX_FMT_VAAPI:
-		if (pix_fmt_in == AV_PIX_FMT_RGB24)
+		if (vaapi_sw_convert)
+			// Some drivers (e.g. i965 on Broadwell) can encode but can't convert RGB input on the
+			// GPU. Convert to the encoder's format on the CPU and only upload the result.
 			snprintf(
 				args,
 				sizeof(args),
-				"scale=w=%d:h=%d:flags=fast_bilinear,hwupload",
+				"scale=w=%d:h=%d:flags=fast_bilinear:out_color_matrix=bt709:out_range=full,format=%s,"
+				"hwupload",
+				width_out,
+				height_out,
+				av_get_pix_fmt_name(pix_fmt_sw_out));
+		else if (pix_fmt_in == AV_PIX_FMT_RGB24)
+			snprintf(
+				args,
+				sizeof(args),
+				"scale=w=%d:h=%d:flags=fast_bilinear:out_color_matrix=bt709:out_range=full,hwupload",
 				width_out,
 				height_out);
 		else
 			snprintf(
 				args,
 				sizeof(args),
-				"hwupload,scale_vaapi=w=%d:h=%d:format=%s:mode=fast",
+				"hwupload,scale_vaapi=w=%d:h=%d:format=%s:mode=fast:out_color_matrix=bt709:"
+				"out_range=full:out_color_primaries=bt709:out_color_transfer=bt709",
 				width_out,
 				height_out,
 				av_get_pix_fmt_name(pix_fmt_sw_out));
 		break;
 	default:
-		snprintf(args, sizeof(args), "scale=w=%d:h=%d:flags=fast_bilinear", width_out, height_out);
+		snprintf(
+			args,
+			sizeof(args),
+			"scale=w=%d:h=%d:flags=fast_bilinear:out_color_matrix=bt709:out_range=full",
+			width_out,
+			height_out);
 	}
 
-	if ((ret = avfilter_graph_parse_ptr(ctx->filter_graph_scale, args, &inputs, &outputs, NULL)) <
-		0)
+	// Since FFmpeg 7.1 a filter's hw_device_ctx must be set *before* the filter is initialized,
+	// and avfilter_graph_parse_ptr() initializes filters immediately. Use the segment API so the
+	// device can be attached between creating and initializing the filters.
+	AVFilterGraphSegment* seg = NULL;
+	if ((ret = avfilter_graph_segment_parse(ctx->filter_graph_scale, args, 0, &seg)) < 0)
 	{
 		log_warn("Failed to parse filter");
 		goto end;
 	}
-
-	for (unsigned int i = 0; i < ctx->filter_graph_scale->nb_filters; i++)
+	if ((ret = avfilter_graph_segment_create_filters(seg, 0)) < 0)
 	{
-		AVFilterContext* filt = ctx->filter_graph_scale->filters[i];
-		if (strcmp(filt->filter->name, "hwupload") == 0)
+		log_warn("Failed to create filters");
+		avfilter_graph_segment_free(&seg);
+		goto end;
+	}
+	for (size_t i = 0; i < seg->nb_chains; i++)
+	{
+		AVFilterChain* chain = seg->chains[i];
+		for (size_t j = 0; j < chain->nb_filters; j++)
 		{
-			filt->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+			AVFilterContext* filt = chain->filters[j]->filter;
+			if (filt && hw_device_ctx && strcmp(filt->filter->name, "hwupload") == 0)
+				filt->hw_device_ctx = av_buffer_ref(hw_device_ctx);
 		}
+	}
+	// Unlike avfilter_graph_parse_ptr(), the segment API doesn't connect the chain to our
+	// buffer source/sink; it hands back the chain's open input and output pads instead.
+	AVFilterInOut* seg_in = NULL;
+	AVFilterInOut* seg_out = NULL;
+	ret = avfilter_graph_segment_apply(seg, 0, &seg_in, &seg_out);
+	avfilter_graph_segment_free(&seg);
+	if (ret >= 0 && (!seg_in || seg_in->next || !seg_out || seg_out->next))
+		ret = AVERROR(EINVAL); // expect exactly one open input and one open output
+	if (ret >= 0)
+		ret = avfilter_link(ctx->buffersrc_scale_ctx, 0, seg_in->filter_ctx, seg_in->pad_idx);
+	if (ret >= 0)
+		ret = avfilter_link(seg_out->filter_ctx, seg_out->pad_idx, ctx->buffersink_scale_ctx, 0);
+	avfilter_inout_free(&seg_in);
+	avfilter_inout_free(&seg_out);
+	if (ret < 0)
+	{
+		log_warn("Failed to initialize filter graph: %s", av_err2str(ret));
+		goto end;
 	}
 
 	if ((ret = avfilter_graph_config(ctx->filter_graph_scale, NULL)) < 0)
@@ -358,6 +433,18 @@ end:
 			av_get_pix_fmt_name(pix_fmt_out),
 			av_get_pix_fmt_name(pix_fmt_sw_out));
 	}
+}
+
+void destroy_drm(DrmContext* d)
+{
+	if (d->scale.frame_out)
+		av_frame_free(&d->scale.frame_out);
+	if (d->scale.filter_graph_scale)
+		avfilter_graph_free(&d->scale.filter_graph_scale);
+	av_buffer_unref(&d->vaapi_frames);
+	av_buffer_unref(&d->drm_frames);
+	av_buffer_unref(&d->drm_device);
+	memset(d, 0, sizeof(DrmContext));
 }
 
 void destroy_scalers(Scalers* s)
@@ -446,7 +533,29 @@ void init_scalers(
 			hw_device_ctx,
 			pix_fmt_sw_out,
 			ctx->frame_out,
+			0,
 			err);
+		if (err->code && pix_fmt_out == AV_PIX_FMT_VAAPI)
+		{
+			log_info(
+				"GPU color conversion unavailable (%s), converting %s on the CPU instead.",
+				err->error_str,
+				av_get_pix_fmt_name(pix_fmts[i]));
+			err->code = 0;
+			init_scaler(
+				scalers[i],
+				width_in,
+				height_in,
+				width_out,
+				height_out,
+				pix_fmts[i],
+				pix_fmt_out,
+				hw_device_ctx,
+				pix_fmt_sw_out,
+				ctx->frame_out,
+				1,
+				err);
+		}
 		OK_OR_ABORT(err);
 	}
 }
@@ -545,7 +654,7 @@ void open_video(VideoContext* ctx, Error* err)
 					ctx->c->pix_fmt = AV_PIX_FMT_VAAPI;
 					ctx->c->hw_frames_ctx = ctx->scalers.hw_frames_ctx;
 					av_opt_set(ctx->c->priv_data, "quality", "7", 0);
-					av_opt_set(ctx->c->priv_data, "qp", "23", 0);
+					av_opt_set_int(ctx->c->priv_data, "qp", ctx->qp, 0);
 					set_codec_params(ctx);
 
 					if ((ret = avcodec_open2(ctx->c, codec, NULL) == 0))
@@ -757,7 +866,7 @@ void open_video(VideoContext* ctx, Error* err)
 		ctx->c->pix_fmt = AV_PIX_FMT_YUV420P;
 		av_opt_set(ctx->c->priv_data, "preset", "ultrafast", 0);
 		av_opt_set(ctx->c->priv_data, "tune", "zerolatency", 0);
-		av_opt_set(ctx->c->priv_data, "crf", "23", 0);
+		av_opt_set_int(ctx->c->priv_data, "crf", ctx->qp, 0);
 		set_codec_params(ctx);
 
 		ret = avcodec_open2(ctx->c, codec, NULL);
@@ -827,6 +936,7 @@ void destroy_video_encoder(VideoContext* ctx)
 		av_free(ctx->buf);
 		destroy_scalers(&ctx->scalers);
 	}
+	destroy_drm(&ctx->drm);
 	if (ctx->hw_device_ctx)
 		av_buffer_unref(&ctx->hw_device_ctx);
 	free(ctx);
@@ -873,9 +983,14 @@ VideoContext* init_video_encoder(
 	int try_vaapi,
 	int try_nvenc,
 	int try_videotoolbox,
-	int try_mediafoundation)
+	int try_mediafoundation,
+	int gop_size,
+	int qp)
 {
 	VideoContext* ctx = malloc(sizeof(VideoContext));
+	// 0 = keep Weylus' defaults (a keyframe every 12 frames lets browsers recover quickly)
+	ctx->gop_size = gop_size > 0 ? gop_size : 12;
+	ctx->qp = qp > 0 ? qp : 23;
 	ctx->rust_ctx = rust_ctx;
 	ctx->width_out = width_out - width_out % 2;
 	ctx->height_out = height_out - height_out % 2;
@@ -892,6 +1007,7 @@ VideoContext* init_video_encoder(
 
 	// make sure all scalers are zero initialized so that destroy can always be called
 	memset(&ctx->scalers, 0, sizeof(Scalers));
+	memset(&ctx->drm, 0, sizeof(DrmContext));
 	return ctx;
 }
 
@@ -930,4 +1046,266 @@ void fill_rgb0(VideoContext* ctx, const void* data, Error* err)
 	scale_frame(scaler, err);
 	OK_OR_ABORT(err)
 	ctx->frame = scaler->frame_out;
+}
+
+#ifdef HAS_VAAPI
+static void free_drm_desc(void* opaque, uint8_t* data)
+{
+	(void)opaque;
+	// The DMA-BUF fd itself belongs to the capture pipeline; only free the descriptor.
+	av_free(data);
+}
+
+static void init_drm(VideoContext* ctx, uint32_t fourcc, uint64_t modifier, int width, int height, Error* err)
+{
+	DrmContext* d = &ctx->drm;
+	int ret;
+	char args[512];
+	enum AVPixelFormat sw_format;
+
+	// DRM fourccs are little-endian channel orders: XR24 = XRGB8888 = B,G,R,X in memory.
+	if (fourcc == 0x34325258) // 'XR24'
+		sw_format = AV_PIX_FMT_BGR0;
+	else if (fourcc == 0x34324258) // 'XB24'
+		sw_format = AV_PIX_FMT_RGB0;
+	else if (fourcc == 0x34325241) // 'AR24'
+		sw_format = AV_PIX_FMT_BGRA;
+	else if (fourcc == 0x34324241) // 'AB24'
+		sw_format = AV_PIX_FMT_RGBA;
+	else
+		ERROR(err, 1, "Unsupported DRM format 0x%08x for zero-copy capture.", fourcc);
+
+	const char* device = getenv("WEYLUS_VAAPI_DEVICE");
+	if ((ret = av_hwdevice_ctx_create(
+			 &d->drm_device,
+			 AV_HWDEVICE_TYPE_DRM,
+			 device ? device : "/dev/dri/renderD128",
+			 NULL,
+			 0)) < 0)
+		ERROR(err, 1, "Failed to open DRM device: %s", av_err2str(ret));
+
+	d->drm_frames = av_hwframe_ctx_alloc(d->drm_device);
+	if (!d->drm_frames)
+		ERROR(err, 1, "Failed to allocate DRM frames context.");
+	AVHWFramesContext* drm_fc = (AVHWFramesContext*)d->drm_frames->data;
+	drm_fc->format = AV_PIX_FMT_DRM_PRIME;
+	drm_fc->sw_format = sw_format;
+	drm_fc->width = width;
+	drm_fc->height = height;
+	if ((ret = av_hwframe_ctx_init(d->drm_frames)) < 0)
+		ERROR(err, 1, "Failed to init DRM frames context: %s", av_err2str(ret));
+
+	// Imported surfaces are created per frame by av_hwframe_map, so no pool is needed.
+	d->vaapi_frames = av_hwframe_ctx_alloc(ctx->hw_device_ctx);
+	if (!d->vaapi_frames)
+		ERROR(err, 1, "Failed to allocate VAAPI frames context.");
+	AVHWFramesContext* va_fc = (AVHWFramesContext*)d->vaapi_frames->data;
+	va_fc->format = AV_PIX_FMT_VAAPI;
+	va_fc->sw_format = sw_format;
+	va_fc->width = width;
+	va_fc->height = height;
+	va_fc->initial_pool_size = 0;
+	if ((ret = av_hwframe_ctx_init(d->vaapi_frames)) < 0)
+		ERROR(err, 1, "Failed to init VAAPI frames context: %s", av_err2str(ret));
+
+	// Filter graph: VAAPI (RGB) -> scale_vaapi -> VAAPI (NV12, output size)
+	ScaleContext* sc = &d->scale;
+	sc->filter_graph_scale = avfilter_graph_alloc();
+	if (!sc->filter_graph_scale)
+		ERROR(err, 1, "Failed to allocate filter graph.");
+
+	sc->buffersrc_scale_ctx =
+		avfilter_graph_alloc_filter(sc->filter_graph_scale, avfilter_get_by_name("buffer"), "in");
+	if (!sc->buffersrc_scale_ctx)
+		ERROR(err, 1, "Failed to allocate buffer source.");
+	AVBufferSrcParameters* par = av_buffersrc_parameters_alloc();
+	if (!par)
+		ERROR(err, 1, "Failed to allocate buffer source parameters.");
+	par->format = AV_PIX_FMT_VAAPI;
+	par->width = width;
+	par->height = height;
+	par->time_base = TIME_BASE;
+	par->sample_aspect_ratio = (AVRational){1, 1};
+	par->hw_frames_ctx = d->vaapi_frames;
+	ret = av_buffersrc_parameters_set(sc->buffersrc_scale_ctx, par);
+	av_free(par);
+	if (ret < 0 || (ret = avfilter_init_dict(sc->buffersrc_scale_ctx, NULL)) < 0)
+		ERROR(err, 1, "Failed to init buffer source: %s", av_err2str(ret));
+
+	if ((ret = avfilter_graph_create_filter(
+			 &sc->buffersink_scale_ctx,
+			 avfilter_get_by_name("buffersink"),
+			 "out",
+			 NULL,
+			 NULL,
+			 sc->filter_graph_scale)) < 0)
+		ERROR(err, 1, "Failed to create buffer sink: %s", av_err2str(ret));
+
+	AVFilterInOut* outputs = avfilter_inout_alloc();
+	AVFilterInOut* inputs = avfilter_inout_alloc();
+	if (!outputs || !inputs)
+	{
+		avfilter_inout_free(&outputs);
+		avfilter_inout_free(&inputs);
+		ERROR(err, 1, "Failed to allocate filter in/outputs.");
+	}
+	outputs->name = av_strdup("in");
+	outputs->filter_ctx = sc->buffersrc_scale_ctx;
+	outputs->pad_idx = 0;
+	outputs->next = NULL;
+	inputs->name = av_strdup("out");
+	inputs->filter_ctx = sc->buffersink_scale_ctx;
+	inputs->pad_idx = 0;
+	inputs->next = NULL;
+
+	// scale_vaapi takes its device from the input frames, so no hw_device_ctx is needed here.
+	snprintf(
+		args,
+		sizeof(args),
+		"scale_vaapi=w=%d:h=%d:format=nv12:mode=fast:out_color_matrix=bt709:out_range=full:"
+		"out_color_primaries=bt709:out_color_transfer=bt709",
+		ctx->width_out,
+		ctx->height_out);
+	ret = avfilter_graph_parse_ptr(sc->filter_graph_scale, args, &inputs, &outputs, NULL);
+	avfilter_inout_free(&inputs);
+	avfilter_inout_free(&outputs);
+	if (ret < 0)
+		ERROR(err, 1, "Failed to parse zero-copy filter graph: %s", av_err2str(ret));
+	if ((ret = avfilter_graph_config(sc->filter_graph_scale, NULL)) < 0)
+		ERROR(err, 1, "Failed to configure zero-copy filter graph: %s", av_err2str(ret));
+
+	sc->frame_out = av_frame_alloc();
+	if (!sc->frame_out)
+		ERROR(err, 1, "Failed to allocate output frame.");
+
+	d->fourcc = fourcc;
+	d->modifier = modifier;
+	d->width = width;
+	d->height = height;
+	d->initialized = 1;
+	log_info(
+		"Zero-copy capture enabled: DMA-BUF %dx%d format 0x%08x modifier 0x%016llx -> VAAPI.",
+		width,
+		height,
+		fourcc,
+		(unsigned long long)modifier);
+}
+#endif
+
+// Encode a frame given as a single-plane DMA-BUF. Only works when the VAAPI encoder is in use;
+// callers should fall back to regular (copying) capture when this reports an error.
+void fill_drm_prime(
+	VideoContext* ctx,
+	int fd,
+	int width,
+	int height,
+	uint32_t fourcc,
+	uint64_t modifier,
+	int offset,
+	int pitch,
+	Error* err)
+{
+	ctx->frame = NULL;
+#ifdef HAS_VAAPI
+	int ret;
+	if (!ctx->c || ctx->c->pix_fmt != AV_PIX_FMT_VAAPI || !ctx->hw_device_ctx)
+		ERROR(err, 1, "Zero-copy capture needs the VAAPI encoder, which is not in use.");
+
+	DrmContext* d = &ctx->drm;
+	if (d->initialized &&
+		(d->fourcc != fourcc || d->modifier != modifier || d->width != width ||
+		 d->height != height))
+		destroy_drm(d);
+	if (!d->initialized)
+	{
+		init_drm(ctx, fourcc, modifier, width, height, err);
+		if (err->code)
+		{
+			destroy_drm(d);
+			return;
+		}
+	}
+
+	AVDRMFrameDescriptor* desc = av_mallocz(sizeof(AVDRMFrameDescriptor));
+	if (!desc)
+		ERROR(err, 1, "Failed to allocate DRM frame descriptor.");
+	// DMA-BUF size is reported by seeking to the end of the fd.
+	off_t size = lseek(fd, 0, SEEK_END);
+	lseek(fd, 0, SEEK_SET);
+	desc->nb_objects = 1;
+	desc->objects[0].fd = fd;
+	desc->objects[0].size = size > 0 ? (size_t)size : (size_t)offset + (size_t)pitch * height;
+	desc->objects[0].format_modifier = modifier;
+	desc->nb_layers = 1;
+	desc->layers[0].format = fourcc;
+	desc->layers[0].nb_planes = 1;
+	desc->layers[0].planes[0].object_index = 0;
+	desc->layers[0].planes[0].offset = offset;
+	desc->layers[0].planes[0].pitch = pitch;
+
+	AVFrame* src = av_frame_alloc();
+	AVFrame* mapped = av_frame_alloc();
+	if (!src || !mapped)
+	{
+		av_free(desc);
+		av_frame_free(&src);
+		av_frame_free(&mapped);
+		ERROR(err, 1, "Failed to allocate frames.");
+	}
+	src->format = AV_PIX_FMT_DRM_PRIME;
+	src->width = width;
+	src->height = height;
+	src->data[0] = (uint8_t*)desc;
+	src->buf[0] = av_buffer_create((uint8_t*)desc, sizeof(*desc), free_drm_desc, NULL, 0);
+	src->hw_frames_ctx = av_buffer_ref(d->drm_frames);
+	if (!src->buf[0] || !src->hw_frames_ctx)
+	{
+		if (!src->buf[0])
+			av_free(desc);
+		av_frame_free(&src);
+		av_frame_free(&mapped);
+		ERROR(err, 1, "Failed to wrap DMA-BUF.");
+	}
+
+	mapped->format = AV_PIX_FMT_VAAPI;
+	mapped->hw_frames_ctx = av_buffer_ref(d->vaapi_frames);
+	ret = av_hwframe_map(mapped, src, AV_HWFRAME_MAP_READ);
+	// The mapping keeps its own reference to src.
+	av_frame_free(&src);
+	if (ret < 0)
+	{
+		av_frame_free(&mapped);
+		ERROR(err, 1, "Failed to import DMA-BUF into VAAPI: %s", av_err2str(ret));
+	}
+
+	ret = av_buffersrc_add_frame_flags(d->scale.buffersrc_scale_ctx, mapped, 0);
+	av_frame_free(&mapped);
+	if (ret < 0)
+		ERROR(err, 1, "Failed to submit frame to zero-copy filter: %s", av_err2str(ret));
+
+	av_frame_unref(d->scale.frame_out);
+	ret = av_buffersink_get_frame(d->scale.buffersink_scale_ctx, d->scale.frame_out);
+	if (ret < 0)
+		ERROR(err, 1, "Failed to get frame from zero-copy filter: %s", av_err2str(ret));
+
+	// Wait until the GPU has finished reading the imported DMA-BUF, so the caller can hand it back
+	// to the compositor before encoding. (A virtual monitor can only draw its next frame into a free
+	// buffer, so holding it during the encode throttles the whole screen.)
+	{
+		AVHWDeviceContext* dev = (AVHWDeviceContext*)ctx->hw_device_ctx->data;
+		AVVAAPIDeviceContext* hw = dev->hwctx;
+		VASurfaceID surface = (VASurfaceID)(uintptr_t)d->scale.frame_out->data[3];
+		vaSyncSurface(hw->display, surface);
+	}
+	ctx->frame = d->scale.frame_out;
+#else
+	(void)fd;
+	(void)width;
+	(void)height;
+	(void)fourcc;
+	(void)modifier;
+	(void)offset;
+	(void)pitch;
+	ERROR(err, 1, "Zero-copy capture is only supported with VAAPI.");
+#endif
 }

@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc};
 use std::thread::{spawn, JoinHandle};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::channel;
-use tracing::{error, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::capturable::{get_capturables, Capturable, Recorder};
 use crate::input::device::{InputDevice, InputDeviceType};
@@ -25,6 +25,8 @@ struct VideoConfig {
     max_width: usize,
     max_height: usize,
     frame_rate: f64,
+    keyframe_interval: u32,
+    quality_qp: u32,
 }
 
 enum VideoCommands {
@@ -218,8 +220,24 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
         } else {
             false
         };
-        if config.capturable_id < self.capturables.len() {
-            let capturable = self.capturables[config.capturable_id].clone();
+        #[cfg(target_os = "linux")]
+        let virtual_capturable: Option<Box<dyn Capturable>> =
+            config.virtual_display.as_ref().map(|v| {
+                // Fit within 4K while keeping the requested shape, with even dimensions.
+                let (w, h) = (v.width.max(320) as f64, v.height.max(240) as f64);
+                let fit = (3840.0 / w).min(2160.0 / h).min(1.0);
+                let even = |x: f64| ((x * fit) as u32 / 2 * 2).max(2);
+                Box::new(crate::capturable::mutter_virtual::VirtualDisplayCapturable {
+                    width: even(w),
+                    height: even(h),
+                }) as Box<dyn Capturable>
+            });
+        #[cfg(not(target_os = "linux"))]
+        let virtual_capturable: Option<Box<dyn Capturable>> = None;
+
+        if virtual_capturable.is_some() || config.capturable_id < self.capturables.len() {
+            let capturable = virtual_capturable
+                .unwrap_or_else(|| self.capturables[config.capturable_id].clone());
 
             #[cfg(target_os = "linux")]
             {
@@ -289,6 +307,8 @@ impl<S, R, FnUInput> WeylusClientHandler<S, R, FnUInput> {
                     max_width: config.max_width,
                     max_height: config.max_height,
                     frame_rate: config.frame_rate,
+                    keyframe_interval: config.keyframe_interval.unwrap_or(0),
+                    quality_qp: config.quality_qp.map_or(0, |q| q.clamp(1, 51)),
                 }))
                 .unwrap();
         } else {
@@ -312,6 +332,20 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
 
     let mut max_width = 1920;
     let mut max_height = 1080;
+    let mut keyframe_interval = 0u32;
+    // name and cursor setting of what's being recorded
+    let mut current_capture: Option<(String, bool)> = None;
+
+    // WEYLUS_STATS=1: log frame pacing every 2 s to diagnose stutter
+    let stats_enabled = std::env::var_os("WEYLUS_STATS").is_some();
+    let bytes_sent = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut stats_start = Instant::now();
+    let (mut st_ticks, mut st_new, mut st_encoded) = (0u32, 0u32, 0u32);
+    let mut st_encode_time = Duration::ZERO;
+    let mut st_max_encode = Duration::ZERO;
+    let mut st_last_encode = Instant::now();
+    let mut st_max_gap = Duration::ZERO;
+    let mut quality_qp = 0u32;
     let mut frame_duration = EFFECTIVE_INIFINITY;
     let mut last_frame = Instant::now();
     let mut paused = false;
@@ -330,6 +364,31 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
 
         match receiver.recv_timeout(if paused { EFFECTIVE_INIFINITY } else { timeout }) {
             Ok(VideoCommands::Start(config)) => {
+                // Re-sending the same config (e.g. after changing quality settings) must not tear
+                // down and recreate a virtual display: that would bounce every window on it.
+                let same_virtual_display = recorder.is_some()
+                    && config.capturable.name().starts_with("Virtual display")
+                    && current_capture == Some((config.capturable.name(), config.capture_cursor));
+                if same_virtual_display {
+                    max_width = config.max_width;
+                    max_height = config.max_height;
+                    if keyframe_interval != config.keyframe_interval
+                        || quality_qp != config.quality_qp
+                    {
+                        video_encoder = None;
+                    }
+                    keyframe_interval = config.keyframe_interval;
+                    quality_qp = config.quality_qp;
+                    let d = 1.0 / config.frame_rate;
+                    frame_duration = if d.is_finite() {
+                        Duration::from_secs_f64(d).min(EFFECTIVE_INIFINITY)
+                    } else {
+                        EFFECTIVE_INIFINITY
+                    };
+                    send_message(&mut sender, MessageOutbound::ConfigOk);
+                    continue;
+                }
+                current_capture = Some((config.capturable.name(), config.capture_cursor));
                 #[allow(unused_assignments)]
                 {
                     // gstpipewire can not handle setting a pipeline's state to Null after another
@@ -347,6 +406,14 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                         recorder = Some(r);
                         max_width = config.max_width;
                         max_height = config.max_height;
+                        if keyframe_interval != config.keyframe_interval
+                            || quality_qp != config.quality_qp
+                        {
+                            // encoder settings changed: make the next frame start a new stream
+                            video_encoder = None;
+                        }
+                        keyframe_interval = config.keyframe_interval;
+                        quality_qp = config.quality_qp;
                         send_message(&mut sender, MessageOutbound::ConfigOk);
                     }
                     Err(err) => {
@@ -384,6 +451,45 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                     warn!("Screen capture not initalized, can not send video frame!");
                     continue;
                 }
+                // Nothing changed on screen and the decoder already has this picture: skip
+                // encoding entirely. (A missing encoder means a new stream that needs a frame.)
+                let is_new = recorder.as_mut().unwrap().poll_new_frame();
+                if stats_enabled {
+                    st_ticks += 1;
+                    if is_new {
+                        st_new += 1;
+                    }
+                    if stats_start.elapsed() >= Duration::from_secs(2) {
+                        let secs = stats_start.elapsed().as_secs_f64();
+                        info!(
+                            "stats: {:.1} ticks/s, {:.1} arrived/s, {:.1} new frames/s from compositor, {:.1} encoded/s, \
+                            encode avg {:.1} ms max {:.1} ms, longest gap between encodes {:.0} ms, {:.2} Mbit/s",
+                            st_ticks as f64 / secs,
+                            {
+                                #[cfg(target_os = "linux")]
+                                let arrived = crate::capturable::pipewire::SAMPLES_ARRIVED
+                                    .swap(0, std::sync::atomic::Ordering::Relaxed);
+                                #[cfg(not(target_os = "linux"))]
+                                let arrived = 0u32;
+                                arrived as f64 / secs
+                            },
+                            st_new as f64 / secs,
+                            st_encoded as f64 / secs,
+                            if st_encoded > 0 { st_encode_time.as_secs_f64() * 1000.0 / st_encoded as f64 } else { 0.0 },
+                            st_max_encode.as_secs_f64() * 1000.0,
+                            st_max_gap.as_secs_f64() * 1000.0,
+                            bytes_sent.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 * 8.0 / 1e6 / secs,
+                        );
+                        stats_start = Instant::now();
+                        (st_ticks, st_new, st_encoded) = (0, 0, 0);
+                        st_encode_time = Duration::ZERO;
+                        st_max_encode = Duration::ZERO;
+                        st_max_gap = Duration::ZERO;
+                    }
+                }
+                if !is_new && video_encoder.is_some() {
+                    continue;
+                }
                 let pixel_data = recorder.as_mut().unwrap().capture();
                 if let Err(err) = pixel_data {
                     warn!("Error capturing screen: {}", err);
@@ -411,17 +517,24 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                 {
                     send_message(&mut sender, MessageOutbound::NewVideo);
                     let mut sender = sender.clone();
+                    let bytes_sent = bytes_sent.clone();
                     let res = VideoEncoder::new(
                         width_in,
                         height_in,
                         width_out,
                         height_out,
                         move |data| {
+                            bytes_sent.fetch_add(
+                                data.len() as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
                             if let Err(err) = sender.send_video(data) {
                                 warn!("Failed to send video frame: {err}!");
                             }
                         },
                         encoder_options,
+                        keyframe_interval,
+                        quality_qp,
                     );
                     match res {
                         Ok(r) => video_encoder = Some(r),
@@ -432,7 +545,21 @@ fn handle_video<S: WeylusSender + Clone + 'static>(
                     };
                 }
                 let video_encoder = video_encoder.as_mut().unwrap();
-                video_encoder.encode(pixel_data);
+                let t = Instant::now();
+                let filled = video_encoder.fill(pixel_data);
+                // the GPU is done with the captured buffer: give it back before encoding
+                recorder.as_mut().unwrap().release_frame();
+                if filled {
+                    video_encoder.encode_filled();
+                }
+                if stats_enabled {
+                    let took = t.elapsed();
+                    st_encoded += 1;
+                    st_encode_time += took;
+                    st_max_encode = st_max_encode.max(took);
+                    st_max_gap = st_max_gap.max(st_last_encode.elapsed());
+                    st_last_encode = Instant::now();
+                }
             }
             // stop thread once the channel is closed
             Err(RecvTimeoutError::Disconnected) => return,

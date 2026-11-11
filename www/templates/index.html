@@ -63,6 +63,21 @@
                         id="enable_custom_input_areas" /> <span>Enable Custom Input
                         Area</span></label>
             </section>
+            <h3>Pencil</h3>
+            <section id="pen_section">
+                <label>Tip feel (soft &harr; firm): <br><input type="range" id="pen_tip_feel" min="-1" max="1"
+                        step="0.05" value="0" /><output></output></label>
+                <label>Full pressure at: <br><input type="range" id="pen_full_pressure" min="0.2" max="1"
+                        step="0.01" value="0.45" /><output></output></label>
+                <label>Light touch boost: <br><input type="range" id="pen_tip_offset" min="0" max="0.2"
+                        step="0.005" value="0.03" /><output></output></label>
+                <canvas id="pen_curve_preview" width="120" height="120"></canvas>
+                <label>Stroke smoothing: <br><input type="range" id="pen_smoothing" min="0" max="100" step="1"
+                        value="30" /><output></output></label>
+                <label>Pressure smoothing: <br><input type="range" id="pen_pressure_smoothing" min="0" max="100"
+                        step="1" value="30" /><output></output></label>
+                <label><input type="checkbox" id="pen_curves" checked /> <span>Curved strokes</span></label>
+            </section>
             <section {{#if (not uinput_enabled)}}class="hide" {{/if}}>
                 <label><span>Client Name:</span><br><input type="text" id="client_name" /><br><span>Optional, useful to
                         distinguish multiple devices.</span></label>

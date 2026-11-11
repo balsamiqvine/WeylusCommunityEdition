@@ -48,6 +48,7 @@ dbus = "^0.9"
 gstreamer = "^0.24"
 gstreamer-app = { version = "^0.24", features = ["v1_16"] }
 gstreamer-video = "^0.24"
+gstreamer-allocators = "^0.24"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 pnet_datalink = "^0.35"

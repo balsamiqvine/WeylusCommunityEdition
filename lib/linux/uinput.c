@@ -170,9 +170,10 @@ void init_stylus(int fd, const char* name, Error* err)
 	OK_OR_ABORT(err);
 	setup_abs(fd, ABS_PRESSURE, 0, ABS_MAXVAL, 12, err);
 	OK_OR_ABORT(err);
-	setup_abs(fd, ABS_TILT_X, -90, 90, 12, err);
+	// ABS_TILT resolution is in units per radian; values are degrees, so 180/pi ~= 57.
+	setup_abs(fd, ABS_TILT_X, -90, 90, 57, err);
 	OK_OR_ABORT(err);
-	setup_abs(fd, ABS_TILT_Y, -90, 90, 12, err);
+	setup_abs(fd, ABS_TILT_Y, -90, 90, 57, err);
 	OK_OR_ABORT(err);
 
 	setup(fd, name, err);

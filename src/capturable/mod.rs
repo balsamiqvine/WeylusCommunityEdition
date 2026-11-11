@@ -5,6 +5,8 @@ use tracing::warn;
 #[cfg(target_os = "macos")]
 pub mod core_graphics;
 #[cfg(target_os = "linux")]
+pub mod mutter_virtual;
+#[cfg(target_os = "linux")]
 pub mod pipewire;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
@@ -19,6 +21,16 @@ pub mod win_ctx;
 pub mod x11;
 pub trait Recorder {
     fn capture(&mut self) -> Result<crate::video::PixelProvider<'_>, Box<dyn Error>>;
+
+    /// Fetch the newest frame and report whether it differs from the previous one, so unchanged
+    /// frames don't have to be encoded again. The following `capture()` returns that frame.
+    /// Recorders that can't tell always report a new frame.
+    fn poll_new_frame(&mut self) -> bool {
+        true
+    }
+
+    /// Give the last captured frame's buffer back to the source after it has been encoded.
+    fn release_frame(&mut self) {}
 }
 
 pub trait BoxCloneCapturable {

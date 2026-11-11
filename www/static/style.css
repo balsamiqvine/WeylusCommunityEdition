@@ -207,3 +207,10 @@ label input:disabled + span {
 #debug_overlay span.updated {
     color: darkgreen;
 }
+#pen_curve_preview {
+    position: static;
+    width: 120px;
+    height: 120px;
+    display: block;
+    margin: 4px 0;
+}

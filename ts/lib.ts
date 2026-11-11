@@ -153,7 +153,28 @@ class Settings {
             (elem, _key, _parent) => this.checks.set(elem.id, elem as HTMLInputElement)
         );
 
+        for (const [id, def] of PEN_RANGES)
+            (document.getElementById(id) as HTMLInputElement).value = def;
+
         this.load_settings();
+
+        const upd_pen = () => {
+            pen_tuning.update_from_dom();
+            for (const [id, _] of PEN_RANGES) {
+                const input = document.getElementById(id) as HTMLInputElement;
+                const output = input.nextElementSibling as HTMLOutputElement;
+                if (output)
+                    output.value = input.value;
+            }
+            draw_pressure_curve_preview();
+        };
+        for (const [id, _] of PEN_RANGES) {
+            const input = document.getElementById(id) as HTMLInputElement;
+            input.oninput = upd_pen;
+            input.onchange = () => { upd_pen(); this.save_settings(); };
+        }
+        this.checks.get("pen_curves").onchange = () => { upd_pen(); this.save_settings(); };
+        upd_pen();
 
         // event handling
 
@@ -261,6 +282,10 @@ class Settings {
         settings["frame_rate"] = frame_rate_scale(this.frame_rate_input.valueAsNumber).toString();
         settings["scale_video"] = this.scale_video_input.value;
         settings["min_pressure"] = this.range_min_pressure.value;
+        let pen = Object(null);
+        for (const [id, _] of PEN_RANGES)
+            pen[id] = (document.getElementById(id) as HTMLInputElement).value;
+        settings["pen"] = pen;
         settings["custom_input_areas"] = this.custom_input_areas;
         settings["client_name"] = this.client_name_input.value;
         localStorage.setItem("settings", JSON.stringify(settings));
@@ -297,6 +322,12 @@ class Settings {
             let min_pressure = settings["min_pressure"];
             if (min_pressure)
                 this.range_min_pressure.value = min_pressure;
+
+            let pen = settings["pen"];
+            if (pen)
+                for (const [id, _] of PEN_RANGES)
+                    if (typeof pen[id] === "string")
+                        (document.getElementById(id) as HTMLInputElement).value = pen[id];
 
             this.custom_input_areas = settings["custom_input_areas"];
 
@@ -398,6 +429,234 @@ class Settings {
         return this.checks.get("enable_video").checked;
     }
 }
+
+/*
+ * Pencil tuning: pressure curve + stroke smoothing.
+ *
+ * Browsers (especially Safari with an Apple Pencil) hand us raw, unfiltered samples. Dedicated
+ * tablet drivers apply a pressure curve and the drawing app usually smooths the stroke. Here we
+ * do both before the events ever reach the host, trading a few milliseconds of latency for
+ * clean strokes.
+ */
+
+// [element id, default value]
+const PEN_RANGES: [string, string][] = [
+    ["pen_tip_feel", "0"],
+    ["pen_full_pressure", "0.45"],
+    ["pen_tip_offset", "0.03"],
+    ["pen_smoothing", "30"],
+    ["pen_pressure_smoothing", "30"],
+];
+
+class PenTuning {
+    tip_feel = 0;           // -1 (soft) .. 1 (firm)
+    full_pressure = 0.45;   // raw pressure that already counts as 100%
+    tip_offset = 0.03;      // minimum pressure reported while the tip is down
+    smoothing = 30;         // 0..100, position smoothing strength
+    pressure_smoothing = 30;// 0..100, pressure smoothing strength
+    curves = true;          // interpolate a curve through samples instead of straight lines
+
+    // Max smoothing time constant in milliseconds at strength 100.
+    static readonly MAX_TAU_MS = 40;
+
+    update_from_dom() {
+        const num = (id: string) => (document.getElementById(id) as HTMLInputElement).valueAsNumber;
+        this.tip_feel = num("pen_tip_feel");
+        this.full_pressure = num("pen_full_pressure");
+        this.tip_offset = num("pen_tip_offset");
+        this.smoothing = num("pen_smoothing");
+        this.pressure_smoothing = num("pen_pressure_smoothing");
+        this.curves = (document.getElementById("pen_curves") as HTMLInputElement).checked;
+    }
+}
+
+let pen_tuning = new PenTuning();
+
+function cubic_bezier_1d(t: number, p1: number, p2: number): number {
+    const u = 1 - t;
+    return 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t;
+}
+
+/* Same family of curves as GNOME's "Tip Pressure Feel" slider / xsetwacom's PressureCurve:
+ * a cubic bezier from (0,0) to (1,1) with control points (0,a),(1-a,1) for a soft tip and
+ * (a,0),(1,1-a) for a firm one. feel is continuous in [-1, 1]. */
+function pressure_curve(x: number, feel: number): number {
+    if (feel == 0)
+        return x;
+    const a = 0.75 * Math.abs(feel);
+    let x1: number, y1: number, x2: number, y2: number;
+    if (feel < 0) {
+        [x1, y1, x2, y2] = [0, a, 1 - a, 1];
+    } else {
+        [x1, y1, x2, y2] = [a, 0, 1, 1 - a];
+    }
+    // x(t) is monotonic, so bisect for t.
+    let lo = 0, hi = 1, t = x;
+    for (let i = 0; i < 24; i++) {
+        t = (lo + hi) / 2;
+        if (cubic_bezier_1d(t, x1, x2) < x)
+            lo = t;
+        else
+            hi = t;
+    }
+    return cubic_bezier_1d(t, y1, y2);
+}
+
+function map_pen_pressure(raw: number): number {
+    let p = Math.min(Math.max(raw / Math.max(pen_tuning.full_pressure, 0.01), 0), 1);
+    p = pressure_curve(p, pen_tuning.tip_feel);
+    // libinput only considers the tip "down" above a small pressure threshold and rescales
+    // everything above it. Lift the whole range a little so the lightest touch still registers.
+    return pen_tuning.tip_offset + (1 - pen_tuning.tip_offset) * p;
+}
+
+function draw_pressure_curve_preview() {
+    const canvas = document.getElementById("pen_curve_preview") as HTMLCanvasElement;
+    if (!canvas)
+        return;
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = "#555";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+    ctx.beginPath();
+    ctx.moveTo(0, h);
+    ctx.lineTo(w, 0);
+    ctx.stroke();
+    ctx.strokeStyle = "#0af";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i <= w; i++) {
+        const y = map_pen_pressure(i / w);
+        if (i == 0)
+            ctx.moveTo(i, h - y * h);
+        else
+            ctx.lineTo(i, h - y * h);
+    }
+    ctx.stroke();
+}
+
+function clone_pevent(e: PEvent): PEvent {
+    return Object.assign(Object.create(PEvent.prototype), e);
+}
+
+function catmull_rom(p0: number, p1: number, p2: number, p3: number, t: number): number {
+    const t2 = t * t, t3 = t2 * t;
+    return 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+}
+
+class StrokeState {
+    touching = false;
+    sx = 0;
+    sy = 0;
+    sp = 0;
+    last_ts = 0;
+    // smoothed points of the current stroke, newest last (only the last 4 are needed)
+    pts: PEvent[] = [];
+}
+
+class StylusFilter {
+    strokes = new Map<number, StrokeState>();
+
+    process(ev: PEvent, rect: DOMRect): PEvent[] {
+        let s = this.strokes.get(ev.pointer_id);
+        if (!s) {
+            s = new StrokeState();
+            this.strokes.set(ev.pointer_id, s);
+        }
+        switch (ev.event_type) {
+            case "pointerdown": {
+                ev.pressure = map_pen_pressure(ev.pressure);
+                s.touching = true;
+                s.sx = ev.x;
+                s.sy = ev.y;
+                s.sp = ev.pressure;
+                s.last_ts = ev.timestamp;
+                s.pts = [ev];
+                return [ev];
+            }
+            case "pointermove": {
+                if (!s.touching)
+                    return [ev]; // hover: pass through untouched
+                ev.pressure = map_pen_pressure(ev.pressure);
+                // timestamps are in microseconds
+                const dt_ms = Math.max((ev.timestamp - s.last_ts) / 1000, 0.5);
+                s.last_ts = ev.timestamp;
+                const alpha = (strength: number) => {
+                    const tau = strength / 100 * PenTuning.MAX_TAU_MS;
+                    return tau <= 0 ? 1 : 1 - Math.exp(-dt_ms / tau);
+                };
+                const a_pos = alpha(pen_tuning.smoothing);
+                const a_p = alpha(pen_tuning.pressure_smoothing);
+                s.sx += a_pos * (ev.x - s.sx);
+                s.sy += a_pos * (ev.y - s.sy);
+                s.sp += a_p * (ev.pressure - s.sp);
+                ev.x = s.sx;
+                ev.y = s.sy;
+                ev.pressure = s.sp;
+                if (!pen_tuning.curves)
+                    return [ev];
+                s.pts.push(ev);
+                if (s.pts.length > 4)
+                    s.pts.shift();
+                // One sample of lag: emit the segment between the previous two points now
+                // that we know where the stroke goes next.
+                if (s.pts.length < 3)
+                    return [];
+                const n = s.pts.length;
+                const p0 = s.pts[Math.max(n - 4, 0)];
+                return this.segment(p0, s.pts[n - 3], s.pts[n - 2], s.pts[n - 1], rect);
+            }
+            case "pointerup":
+            case "pointercancel":
+            case "pointerout":
+            case "pointerleave": {
+                if (!s.touching)
+                    return [ev];
+                s.touching = false;
+                let out: PEvent[] = [];
+                const n = s.pts.length;
+                if (pen_tuning.curves && n >= 2) {
+                    const last = s.pts[n - 1];
+                    out = this.segment(s.pts[Math.max(n - 3, 0)], s.pts[n - 2], last, last, rect);
+                }
+                // Lift off where the smoothed stroke ended rather than snapping to the raw
+                // position, which would leave a little hook at the end of every stroke.
+                ev.x = s.sx;
+                ev.y = s.sy;
+                s.pts = [];
+                out.push(ev);
+                return out;
+            }
+            default:
+                return [ev];
+        }
+    }
+
+    // Points on the Catmull-Rom curve from p1 (exclusive) to p2 (inclusive).
+    segment(p0: PEvent, p1: PEvent, p2: PEvent, p3: PEvent, rect: DOMRect): PEvent[] {
+        const dist_px = Math.hypot((p2.x - p1.x) * rect.width, (p2.y - p1.y) * rect.height);
+        const steps = Math.min(Math.max(Math.ceil(dist_px / 4), 1), 8);
+        const out: PEvent[] = [];
+        for (let i = 1; i <= steps; i++) {
+            const t = i / steps;
+            const e = clone_pevent(p2);
+            e.event_type = "pointermove";
+            e.x = catmull_rom(p0.x, p1.x, p2.x, p3.x, t);
+            e.y = catmull_rom(p0.y, p1.y, p2.y, p3.y, t);
+            const lerp = (a: number, b: number) => a + (b - a) * t;
+            e.pressure = Math.min(Math.max(lerp(p1.pressure, p2.pressure), 0), 1);
+            e.tilt_x = Math.round(lerp(p1.tilt_x, p2.tilt_x));
+            e.tilt_y = Math.round(lerp(p1.tilt_y, p2.tilt_y));
+            e.timestamp = Math.round(lerp(p1.timestamp, p2.timestamp));
+            out.push(e);
+        }
+        return out;
+    }
+}
+
+let stylus_filter = new StylusFilter();
 
 let settings: Settings;
 let debug_overlay: HTMLElement;
@@ -806,17 +1065,10 @@ class PointerHandler {
             let rect = (event.target as HTMLElement).getBoundingClientRect();
             const events = event_type === "pointermove" && typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event];
             for (let event of events) {
-                this.webSocket.send(
-                    JSON.stringify(
-                        {
-                            "PointerEvent": new PEvent(
-                                event_type,
-                                event,
-                                rect
-                            )
-                        }
-                    )
-                );
+                const pevent = new PEvent(event_type, event, rect);
+                const out = event.pointerType == "pen" ? stylus_filter.process(pevent, rect) : [pevent];
+                for (const e of out)
+                    this.webSocket.send(JSON.stringify({ "PointerEvent": e }));
             }
             if (settings.visible) {
                 settings.toggle();

@@ -1,4 +1,5 @@
 use std::os::raw::{c_int, c_uchar, c_void};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tracing::warn;
@@ -16,6 +17,8 @@ extern "C" {
         try_nvenc: c_int,
         try_videotoolbox: c_int,
         try_mediafoundation: c_int,
+        gop_size: c_int,
+        qp: c_int,
     ) -> *mut c_void;
     fn open_video(handle: *mut c_void, err: *mut CError);
     fn destroy_video_encoder(handle: *mut c_void);
@@ -24,6 +27,27 @@ extern "C" {
     fn fill_rgb(ctx: *mut c_void, data: *const u8, err: *mut CError);
     fn fill_rgb0(ctx: *mut c_void, data: *const u8, err: *mut CError);
     fn fill_bgr0(ctx: *mut c_void, data: *const u8, stride: c_int, err: *mut CError);
+    #[cfg(target_os = "linux")]
+    fn fill_drm_prime(
+        ctx: *mut c_void,
+        fd: c_int,
+        width: c_int,
+        height: c_int,
+        fourcc: u32,
+        modifier: u64,
+        offset: c_int,
+        pitch: c_int,
+        err: *mut CError,
+    );
+}
+
+/// Set once zero-copy (DMA-BUF) capture failed, e.g. because the encoder isn't VAAPI or the
+/// driver can't import the buffers. Capturers then switch back to regular copying capture.
+pub static DMABUF_DISABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn dmabuf_allowed() -> bool {
+    !DMABUF_DISABLED.load(Ordering::Relaxed)
+        && std::env::var("WEYLUS_NO_DMABUF").map_or(true, |v| v.is_empty() || v == "0")
 }
 
 // this is used as callback in lib/encode_video.c via ffmpegs AVIOContext
@@ -43,6 +67,21 @@ pub enum PixelProvider<'a> {
     BGR0(usize, usize, &'a [u8]),
     // width, height, stride
     BGR0S(usize, usize, usize, &'a [u8]),
+    /// A single-plane DMA-BUF living in GPU memory; the fd stays valid for the borrow.
+    #[cfg(target_os = "linux")]
+    DmaBuf(DmaBufFrame<'a>),
+}
+
+#[cfg(target_os = "linux")]
+pub struct DmaBufFrame<'a> {
+    pub width: usize,
+    pub height: usize,
+    pub fd: std::os::fd::BorrowedFd<'a>,
+    /// DRM fourcc, e.g. XR24
+    pub fourcc: u32,
+    pub modifier: u64,
+    pub offset: usize,
+    pub stride: usize,
 }
 
 impl<'a> PixelProvider<'a> {
@@ -52,6 +91,8 @@ impl<'a> PixelProvider<'a> {
             PixelProvider::RGB0(w, h, _) => (*w, *h),
             PixelProvider::BGR0(w, h, _) => (*w, *h),
             PixelProvider::BGR0S(w, h, _, _) => (*w, *h),
+            #[cfg(target_os = "linux")]
+            PixelProvider::DmaBuf(f) => (f.width, f.height),
         }
     }
 }
@@ -82,6 +123,8 @@ impl VideoEncoder {
         height_out: usize,
         mut write_data: impl FnMut(&[u8]) + 'static,
         options: EncoderOptions,
+        keyframe_interval: u32,
+        quality_qp: u32,
     ) -> Result<Box<Self>, CError> {
         let mut video_encoder = Box::new(Self {
             handle: std::ptr::null_mut(),
@@ -103,6 +146,8 @@ impl VideoEncoder {
                 options.try_nvenc.into(),
                 options.try_videotoolbox.into(),
                 options.try_mediafoundation.into(),
+                keyframe_interval.min(i32::MAX as u32) as c_int,
+                quality_qp as c_int,
             )
         };
         video_encoder.handle = handle;
@@ -116,6 +161,14 @@ impl VideoEncoder {
     }
 
     pub fn encode(&mut self, pixel_provider: PixelProvider) {
+        if self.fill(pixel_provider) {
+            self.encode_filled();
+        }
+    }
+
+    /// Convert/scale a frame into the encoder's input. Afterwards the source buffer is no longer
+    /// needed and can be released before `encode_filled()`. Returns false on failure.
+    pub fn fill(&mut self, pixel_provider: PixelProvider) -> bool {
         let mut err = CError::new();
         match pixel_provider {
             PixelProvider::BGR0(w, _, bgr0) => unsafe {
@@ -130,11 +183,43 @@ impl VideoEncoder {
             PixelProvider::RGB0(_, _, rgb) => unsafe {
                 fill_rgb0(self.handle, rgb.as_ptr(), &mut err);
             },
+            #[cfg(target_os = "linux")]
+            PixelProvider::DmaBuf(f) => {
+                use std::os::fd::AsRawFd;
+                unsafe {
+                    fill_drm_prime(
+                        self.handle,
+                        f.fd.as_raw_fd(),
+                        f.width as c_int,
+                        f.height as c_int,
+                        f.fourcc,
+                        f.modifier,
+                        f.offset as c_int,
+                        f.stride as c_int,
+                        &mut err,
+                    );
+                }
+                if err.is_err() {
+                    if !DMABUF_DISABLED.swap(true, Ordering::Relaxed) {
+                        warn!(
+                            "Zero-copy capture failed ({}), falling back to copying frames.",
+                            err
+                        );
+                    }
+                    return false;
+                }
+            }
         }
         if err.is_err() {
             warn!("Failed to fill video frame: {}", err);
-            return;
+            return false;
         }
+        true
+    }
+
+    /// Encode the frame prepared by `fill()` and hand the packets to the writer.
+    pub fn encode_filled(&mut self) {
+        let mut err = CError::new();
         unsafe {
             encode_video_frame(
                 self.handle,

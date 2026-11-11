@@ -10,6 +10,25 @@ pub struct ClientConfiguration {
     pub max_height: usize,
     pub client_name: Option<String>,
     pub frame_rate: f64,
+    /// Frames between keyframes. Clients on a reliable connection that don't need to recover
+    /// from dropped data (e.g. a native app) can use long intervals and spend the bits on quality.
+    /// Missing = server default.
+    pub keyframe_interval: Option<u32>,
+    /// Encoder quantizer, roughly 10 (near lossless) to 40 (very compressed). Missing = default.
+    pub quality_qp: Option<u32>,
+    /// Instead of capturing `capturable_id`, create a virtual monitor at this size (Linux with
+    /// GNOME/Mutter), so the client becomes an extra screen at its native resolution.
+    pub virtual_display: Option<VirtualDisplayRequest>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct VirtualDisplayRequest {
+    /// Size in physical pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Ignored: Mutter misbehaves when a recorded virtual monitor's scale is changed, so clients
+    /// upscale a smaller display instead. Kept so older clients' configs still parse.
+    pub scale: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

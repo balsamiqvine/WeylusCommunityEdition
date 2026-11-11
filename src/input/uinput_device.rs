@@ -496,6 +496,37 @@ impl InputDevice for UInputDevice {
                     | PointerEventType::OVER
                     | PointerEventType::ENTER => {
                         if let PointerEventType::DOWN = event.event_type {
+                            // Most iPads (and many other tablets) don't report hover, so the
+                            // pen enters proximity and touches down in the same event. If
+                            // libinput sees pressure > 0 in the proximity-in frame it assumes a
+                            // worn tip and subtracts that pressure as an offset from every
+                            // subsequent stroke, which swallows light strokes. Announce the
+                            // tool with zero pressure in its own frame first.
+                            if !self.tool_pen_active && !event.buttons.contains(Button::ERASER) {
+                                self.send(self.stylus_fd, ET_KEY, EC_KEY_TOOL_PEN, 1);
+                                self.send(self.stylus_fd, ET_KEY, EC_KEY_TOOL_RUBBER, 0);
+                                self.send(
+                                    self.stylus_fd,
+                                    ET_ABSOLUTE,
+                                    EC_ABSOLUTE_X,
+                                    self.transform_x(event.x),
+                                );
+                                self.send(
+                                    self.stylus_fd,
+                                    ET_ABSOLUTE,
+                                    EC_ABSOLUTE_Y,
+                                    self.transform_y(event.y),
+                                );
+                                self.send(self.stylus_fd, ET_ABSOLUTE, EC_ABSOLUTE_PRESSURE, 0);
+                                self.send(
+                                    self.stylus_fd,
+                                    ET_MSC,
+                                    EC_MSC_TIMESTAMP,
+                                    (event.timestamp % (i32::MAX as u64 + 1)) as i32,
+                                );
+                                self.send(self.stylus_fd, ET_SYNC, EC_SYNC_REPORT, 0);
+                                self.tool_pen_active = true;
+                            }
                             self.pen_touching = true;
                             self.send(self.stylus_fd, ET_KEY, EC_KEY_TOUCH, 1);
                         }
