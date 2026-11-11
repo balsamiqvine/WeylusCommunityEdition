@@ -34,6 +34,11 @@ fn main() {
 
     log::setup_logging(sender);
 
+    // A previous run that was killed may have left the pen mapped to a virtual display that no
+    // longer exists, which makes it land in the wrong place.
+    #[cfg(target_os = "linux")]
+    capturable::mutter_virtual::reset_stale_mapping();
+
     let conf = get_config();
 
     if let Some(shell) = conf.completions {

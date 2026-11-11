@@ -52,17 +52,15 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
             self?.decoder.reset()
             self?.videoView.clear()
         }
-        Publishers.CombineLatest3(prefs.$upscaler, prefs.$sharpness, prefs.$chromaGuide)
-            .sink { [weak self] upscaler, sharpness, chromaGuide in
-                self?.videoView.settings = RenderSettings(
-                    upscaler: Upscaler(rawValue: upscaler) ?? .metalfx,
-                    sharpness: Float(sharpness),
-                    chromaGuide: chromaGuide
-                )
-                // integer scaling changes the picture's size
-                DispatchQueue.main.async { self?.setNeedsLayout() }
-            }
-            .store(in: &cancellables)
+        // @Published fires before the new value is stored, so re-read everything on the next turn.
+        let refresh: (Any) -> Void = { [weak self] _ in
+            DispatchQueue.main.async { self?.updateRenderSettings() }
+        }
+        prefs.$upscaler.sink(receiveValue: refresh).store(in: &cancellables)
+        prefs.$sharpness.sink(receiveValue: refresh).store(in: &cancellables)
+        prefs.$chromaGuide.sink(receiveValue: refresh).store(in: &cancellables)
+        prefs.$extendResolution.sink(receiveValue: refresh).store(in: &cancellables)
+        client.$extending.sink(receiveValue: refresh).store(in: &cancellables)
 
         areaLayer.fillColor = UIColor.clear.cgColor
         areaLayer.strokeColor = UIColor(white: 1, alpha: 0.25).cgColor
@@ -121,6 +119,22 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
         client.$videoSize.sink(receiveValue: relayout).store(in: &cancellables)
     }
 
+    /// Half-resolution extend mode is exactly 2x, so it's always shown pixel-doubled: smoothing
+    /// upscalers would only blur or bend the stair-stepped edges of what apps drew at 1x.
+    private var effectiveUpscaler: Upscaler {
+        if client.extending && prefs.extendResolution == "half" { return .integer }
+        return Upscaler(rawValue: prefs.upscaler) ?? .metalfx
+    }
+
+    private func updateRenderSettings() {
+        videoView.settings = RenderSettings(
+            upscaler: effectiveUpscaler,
+            sharpness: Float(prefs.sharpness),
+            chromaGuide: prefs.chromaGuide
+        )
+        setNeedsLayout() // integer scaling changes the picture's size
+    }
+
     @objc private func onMenuTap() {
         onMenuGesture?()
     }
@@ -161,7 +175,7 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
         let b = contentRect
         // Pixel-perfect mode: the largest whole-number multiple of the video that fits, aligned
         // to the screen's pixel grid. Falls back to a normal fit if even 1x doesn't fit.
-        if prefs.upscaler == Upscaler.integer.rawValue, prefs.showVideo,
+        if effectiveUpscaler == .integer, prefs.showVideo,
            let v = client.videoSize, v.width > 0, v.height > 0 {
             let scale = window?.screen.nativeScale ?? UIScreen.main.nativeScale
             let k = floor(min(b.width * scale / v.width, b.height * scale / v.height))

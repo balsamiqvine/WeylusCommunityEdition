@@ -70,6 +70,11 @@ struct MenuView: View {
                     Text("Half, pixel-doubled (smooth)").tag("half")
                     Text("Native (sharpest, slower)").tag("native")
                 }
+                Text(prefs.extendResolution == "half"
+                     ? "Apps draw at half the iPad's resolution and the picture is pixel-doubled: smooth and right-sized, but strokes are coarser. Use Native for drawing."
+                     : "Every iPad pixel is used: best for drawing, but the UI is small and the frame rate depends on the computer's encoder.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 .onChange(of: prefs.extendResolution) { client.updateVideoSettings() }
             }
             if prefs.displayMode == "mirror" && !client.capturables.isEmpty {

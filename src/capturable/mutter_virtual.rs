@@ -74,12 +74,36 @@ fn map_input_devices(monitor: Option<(&str, &str, &str)>) {
     }
 }
 
+/// Which monitor Weylus' tablet is currently mapped to, as gsettings reports it (empty = automatic).
+fn current_tablet_output() -> String {
+    Command::new("gsettings")
+        .args([
+            "get",
+            &format!("org.gnome.desktop.peripherals.tablet:/org/gnome/desktop/peripherals/tablets/{DEVICE_ID}/"),
+            "output",
+        ])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Undo a mapping to a virtual monitor left behind by a previous run that didn't shut down
+/// cleanly (killed, crashed): such a monitor no longer exists, and GNOME then maps the pen
+/// somewhere else entirely, so it appears offset. Call once at startup.
+pub fn reset_stale_mapping() {
+    if current_tablet_output().contains("Virtual remote monitor") {
+        info!("Resetting pen/touch mapping left over from a previous virtual display.");
+        map_input_devices(None);
+    }
+}
+
 pub struct MutterVirtualDisplay {
     conn: SyncConnection,
     session: Path<'static>,
     /// Connectors that existed before, to recognise the new virtual monitor.
     known_connectors: Vec<String>,
-    mapped: bool,
+    /// Serial of our monitor once pen/touch have been mapped to it.
+    mapped_serial: Option<String>,
 }
 
 impl MutterVirtualDisplay {
@@ -128,7 +152,7 @@ impl MutterVirtualDisplay {
             conn,
             session,
             known_connectors,
-            mapped: false,
+            mapped_serial: None,
         };
         let deadline = Instant::now() + TIMEOUT;
         while node.lock().unwrap().is_none() && Instant::now() < deadline {
@@ -157,7 +181,7 @@ impl MutterVirtualDisplay {
         let ids = &virt.0;
         let size = current_mode(virt).map(|m| (m.1, m.2)).unwrap_or((0, 0));
         map_input_devices(Some((&ids.1, &ids.2, &ids.3)));
-        self.mapped = true;
+        self.mapped_serial = Some(ids.3.clone());
         info!(
             "Virtual display {} ({}x{}) ready; pen and touch mapped to it.",
             ids.0, size.0, size.1
@@ -168,8 +192,13 @@ impl MutterVirtualDisplay {
 
 impl Drop for MutterVirtualDisplay {
     fn drop(&mut self) {
-        if self.mapped {
-            map_input_devices(None);
+        // Only undo the mapping if it still points at *our* monitor: when a client reconnects, the
+        // new connection's display may already be mapped by the time the old one is cleaned up,
+        // and resetting it then would leave the pen pointing at the wrong screen.
+        if let Some(serial) = &self.mapped_serial {
+            if current_tablet_output().contains(&format!("'{serial}'")) {
+                map_input_devices(None);
+            }
         }
         let proxy = self.conn.with_proxy("org.gnome.Mutter.ScreenCast", self.session.clone(), TIMEOUT);
         if let Err(err) =
