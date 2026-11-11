@@ -10,6 +10,7 @@ final class WeylusClient: ObservableObject {
     enum Status: Equatable {
         case disconnected
         case connecting
+        case waitingForUSB  // listening; waiting for the bridge on the computer to connect
         case connected      // socket open, waiting for the user to pick a screen
         case ready          // config sent, input is live
         case failed(String)
@@ -30,6 +31,10 @@ final class WeylusClient: ObservableObject {
     private let parser = FragmentedMP4Parser()
 
     private var conn: NWConnection?
+    /// USB mode: listener + WebSocket client over the connection the computer's bridge opens.
+    private var usb: USBWebSocket?
+    private var usbOpen = false
+    private var isOpen: Bool { conn != nil || usbOpen }
     private let textContext = NWConnection.ContentContext(
         identifier: "text",
         metadata: [NWProtocolWebSocket.Metadata(opcode: .text)]
@@ -46,6 +51,10 @@ final class WeylusClient: ObservableObject {
         disconnect()
         setUpParser()
         let prefs = Prefs.shared
+        if prefs.connection == "usb" {
+            connectUSB()
+            return
+        }
         var comps = URLComponents()
         comps.scheme = "ws"
         comps.host = prefs.host.trimmingCharacters(in: .whitespaces)
@@ -72,14 +81,8 @@ final class WeylusClient: ObservableObject {
             guard let self, self.conn === c else { return }
             switch state {
             case .ready:
-                self.status = .connected
                 self.receive(on: c)
-                if Prefs.shared.displayMode == "extend" {
-                    // No screen list: listing screens makes GNOME show a share dialog.
-                    self.startExtend()
-                } else {
-                    self.sendRaw("\"GetCapturableList\"")
-                }
+                self.didOpen()
             case .waiting(let err):
                 self.status = .failed("Can't reach computer: \(err.localizedDescription)")
             case .failed(let err):
@@ -94,7 +97,56 @@ final class WeylusClient: ObservableObject {
         c.start(queue: .main)
     }
 
+    /// The WebSocket to Weylus is open (over Wi-Fi or USB): start mirroring or extending.
+    private func didOpen() {
+        status = .connected
+        if Prefs.shared.displayMode == "extend" {
+            // No screen list: listing screens makes GNOME show a share dialog.
+            startExtend()
+        } else {
+            sendRaw("\"GetCapturableList\"")
+        }
+    }
+
+    private func connectUSB() {
+        let prefs = Prefs.shared
+        var path = "/ws"
+        if !prefs.accessCode.isEmpty,
+           let code = prefs.accessCode.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            path += "?access_code=\(code)"
+        }
+        let u = USBWebSocket(port: UInt16(clamping: prefs.port), requestPath: path)
+        u.onOpen = { [weak self] in
+            self?.usbOpen = true
+            self?.didOpen()
+        }
+        u.onText = { [weak self] data in self?.handle(text: data) }
+        u.onBinary = { [weak self] data in self?.parser.append(data) }
+        u.onClose = { [weak self] _ in
+            guard let self else { return }
+            // cable unplugged or bridge stopped: reset and wait for the next connection
+            self.usbOpen = false
+            self.parser.reset()
+            self.onVideoReset?()
+            self.videoSize = nil
+            self.capturables = []
+            self.selected = nil
+            self.extending = false
+            self.status = .waitingForUSB
+        }
+        do {
+            try u.start()
+            usb = u
+            status = .waitingForUSB
+        } catch {
+            status = .failed("Can't listen for USB on port \(prefs.port): \(error.localizedDescription)")
+        }
+    }
+
     func disconnect() {
+        usb?.stop()
+        usb = nil
+        usbOpen = false
         conn?.cancel()
         conn = nil
         lastError = nil
@@ -118,7 +170,7 @@ final class WeylusClient: ObservableObject {
 
     /// Ask Weylus to create a virtual monitor at the iPad's resolution and stream it.
     func startExtend() {
-        guard conn != nil, let size = extendSize, size.width >= 320, size.height >= 240 else { return }
+        guard isOpen, let size = extendSize, size.width >= 320, size.height >= 240 else { return }
         let prefs = Prefs.shared
         // even dimensions keep the encoder and every scale factor happy
         let w = Int(size.width) / 2 * 2, h = Int(size.height) / 2 * 2
@@ -136,7 +188,7 @@ final class WeylusClient: ObservableObject {
 
     /// Switch between mirroring and extending while connected.
     func applyDisplayMode() {
-        guard conn != nil else { return }
+        guard isOpen else { return }
         if Prefs.shared.displayMode == "extend" {
             startExtend()
         } else {
@@ -252,6 +304,10 @@ final class WeylusClient: ObservableObject {
     // MARK: Socket plumbing
 
     private func sendRaw(_ text: String) {
+        if let usb, usbOpen {
+            usb.send(text: text)
+            return
+        }
         guard let c = conn else { return }
         c.send(content: Data(text.utf8), contentContext: textContext, isComplete: true, completion: .idempotent)
     }

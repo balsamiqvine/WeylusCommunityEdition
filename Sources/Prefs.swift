@@ -6,6 +6,8 @@ final class Prefs: ObservableObject {
     static let shared = Prefs()
 
     // Connection
+    /// "wifi" or "usb" (wired, through the weylus-usb-bridge on the computer)
+    @Published var connection: String { didSet { save(connection, "connection") } }
     @Published var host: String { didSet { save(host, "host") } }
     @Published var port: Int { didSet { save(port, "port") } }
     @Published var accessCode: String { didSet { save(accessCode, "accessCode") } }
@@ -67,6 +69,7 @@ final class Prefs: ObservableObject {
 
     private init() {
         let d = UserDefaults.standard
+        connection = d.string(forKey: "connection") ?? "wifi"
         host = d.string(forKey: "host") ?? ""
         port = d.object(forKey: "port") as? Int ?? 1701
         accessCode = d.string(forKey: "accessCode") ?? ""

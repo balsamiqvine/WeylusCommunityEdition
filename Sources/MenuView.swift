@@ -34,11 +34,18 @@ struct MenuView: View {
     // MARK: Sections
 
     private var connection: some View {
-        Section("Connection") {
-            TextField("Computer IP, e.g. 192.168.1.20", text: $prefs.host)
-                .keyboardType(.numbersAndPunctuation)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
+        Section {
+            Picker("Connection", selection: $prefs.connection) {
+                Text("Wi-Fi").tag("wifi")
+                Text("USB cable").tag("usb")
+            }
+            .onChange(of: prefs.connection) { client.connect() }
+            if prefs.connection == "wifi" {
+                TextField("Computer IP, e.g. 192.168.1.20", text: $prefs.host)
+                    .keyboardType(.numbersAndPunctuation)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
             TextField("Port", value: $prefs.port, format: .number.grouping(.never))
                 .keyboardType(.numberPad)
             TextField("Access code (if Weylus has one)", text: $prefs.accessCode)
@@ -83,6 +90,12 @@ struct MenuView: View {
                 Text("Weylus says: \(err)")
                     .font(.footnote)
                     .foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Connection")
+        } footer: {
+            if prefs.connection == "usb" {
+                Text("Plug the iPad into the computer with a cable and start Weylus there with run-weylus.sh, which also starts the USB bridge. No Wi-Fi needed; the computer must be trusted (tap Trust on the iPad the first time).")
             }
         }
     }
@@ -235,6 +248,7 @@ struct MenuView: View {
         switch client.status {
         case .disconnected: return "Not connected"
         case .connecting: return "Connecting…"
+        case .waitingForUSB: return "Waiting for the computer over USB…"
         case .connected: return "Connected, pick a screen"
         case .ready: return client.extending ? "Live (second screen)" : "Live"
         case .failed(let msg): return msg

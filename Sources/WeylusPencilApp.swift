@@ -33,7 +33,7 @@ struct RootView: View {
             }
             .onAppear {
                 UIApplication.shared.isIdleTimerDisabled = true
-                if !Prefs.shared.host.isEmpty {
+                if Prefs.shared.connection == "usb" || !Prefs.shared.host.isEmpty {
                     client.connect()
                 }
             }
