@@ -35,8 +35,12 @@ final class Prefs: ObservableObject {
     @Published var showCursor: Bool { didSet { save(showCursor, "showCursor") } }
     /// Encoder quantizer: lower is sharper but needs more bandwidth.
     @Published var qualityQP: Int { didSet { save(qualityQP, "qualityQP") } }
-    /// Upscale with MetalFX instead of plain linear filtering.
-    @Published var sharpUpscaling: Bool { didSet { save(sharpUpscaling, "sharpUpscaling") } }
+    /// Upscaling algorithm, see `Upscaler`.
+    @Published var upscaler: String { didSet { save(upscaler, "upscaler") } }
+    /// FSR 1.0 RCAS sharpening strength, 0...1.
+    @Published var sharpness: Double { didSet { save(sharpness, "sharpness") } }
+    /// Luma-guided chroma upsampling (removes red/blue fringes on sharp edges).
+    @Published var chromaGuide: Bool { didSet { save(chromaGuide, "chromaGuide") } }
 
     // Touch and on-screen controls
     /// "off", "touchscreen" (fingers go to the computer as multitouch) or "gestures"
@@ -75,7 +79,9 @@ final class Prefs: ObservableObject {
         frameRate = d.object(forKey: "frameRate") as? Int ?? 30
         showCursor = d.object(forKey: "showCursor") as? Bool ?? true
         qualityQP = d.object(forKey: "qualityQP") as? Int ?? 18
-        sharpUpscaling = d.object(forKey: "sharpUpscaling") as? Bool ?? true
+        upscaler = d.string(forKey: "upscaler") ?? Upscaler.metalfx.rawValue
+        sharpness = d.object(forKey: "sharpness") as? Double ?? 0.25
+        chromaGuide = d.object(forKey: "chromaGuide") as? Bool ?? true
         touchMode = d.string(forKey: "touchMode") ?? "gestures"
         twoFingerTap = d.string(forKey: "twoFingerTap") ?? "ctrl+z"
         threeFingerTap = d.string(forKey: "threeFingerTap") ?? "ctrl+shift+z"

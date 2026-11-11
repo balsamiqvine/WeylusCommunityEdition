@@ -122,7 +122,16 @@ struct MenuView: View {
                 Text("High").tag(18)
                 Text("Very high").tag(14)
             }
-            Toggle("Sharp upscaling (MetalFX)", isOn: $prefs.sharpUpscaling)
+            Picker("Upscaling", selection: $prefs.upscaler) {
+                ForEach(Upscaler.allCases, id: \.rawValue) { u in
+                    Text(u.label).tag(u.rawValue)
+                }
+            }
+            if prefs.upscaler != Upscaler.integer.rawValue {
+                SliderRow(title: "Sharpening (FSR RCAS)", value: $prefs.sharpness, range: 0...1,
+                          label: String(format: "%.0f%%", prefs.sharpness * 100))
+            }
+            Toggle("Clean colour edges", isOn: $prefs.chromaGuide)
             Toggle("Show mouse cursor", isOn: $prefs.showCursor)
             if let size = client.videoSize {
                 LabeledContent("Stream", value: "\(Int(size.width))×\(Int(size.height))")
@@ -130,7 +139,7 @@ struct MenuView: View {
         } header: {
             Text("Video")
         } footer: {
-            Text("Higher quality looks sharper but uses more Wi-Fi bandwidth when the screen changes a lot. Sharp upscaling uses Apple's MetalFX to fit the picture to the iPad's resolution. Turn the screen off to use the iPad as a plain drawing tablet.")
+            Text("Higher quality looks sharper but uses more Wi-Fi bandwidth when the screen changes a lot. MetalFX is Apple's equivalent of FSR 1.0's upscaler; with sharpening it matches FSR 1.0's full pipeline. Integer keeps pixels perfectly square but may leave a border. \"Clean colour edges\" stops red/blue fringes around sharp edges. Turn the screen off to use the iPad as a plain drawing tablet.")
         }
         .onChange(of: prefs.showVideo) { client.updateVideoSettings() }
         .onChange(of: prefs.frameRate) { client.updateVideoSettings() }

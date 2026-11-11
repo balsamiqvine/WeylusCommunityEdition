@@ -50,9 +50,16 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
             self?.decoder.reset()
             self?.videoView.clear()
         }
-        videoView.useMetalFX = prefs.sharpUpscaling
-        prefs.$sharpUpscaling
-            .sink { [weak self] on in self?.videoView.useMetalFX = on }
+        Publishers.CombineLatest3(prefs.$upscaler, prefs.$sharpness, prefs.$chromaGuide)
+            .sink { [weak self] upscaler, sharpness, chromaGuide in
+                self?.videoView.settings = RenderSettings(
+                    upscaler: Upscaler(rawValue: upscaler) ?? .metalfx,
+                    sharpness: Float(sharpness),
+                    chromaGuide: chromaGuide
+                )
+                // integer scaling changes the picture's size
+                DispatchQueue.main.async { self?.setNeedsLayout() }
+            }
             .store(in: &cancellables)
 
         areaLayer.fillColor = UIColor.clear.cgColor
@@ -138,6 +145,19 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
 
     private var activeArea: CGRect {
         let b = contentRect
+        // Pixel-perfect mode: the largest whole-number multiple of the video that fits, aligned
+        // to the screen's pixel grid. Falls back to a normal fit if even 1x doesn't fit.
+        if prefs.upscaler == Upscaler.integer.rawValue, prefs.showVideo,
+           let v = client.videoSize, v.width > 0, v.height > 0 {
+            let scale = window?.screen.scale ?? UIScreen.main.scale
+            let k = floor(min(b.width * scale / v.width, b.height * scale / v.height))
+            if k >= 1 {
+                let w = v.width * k / scale, h = v.height * k / scale
+                let x = ((b.midX - w / 2) * scale).rounded() / scale
+                let y = ((b.midY - h / 2) * scale).rounded() / scale
+                return CGRect(x: x, y: y, width: w, height: h)
+            }
+        }
         guard let a = targetAspect, b.width > 0, b.height > 0 else { return b }
         if b.width / b.height > a {
             let w = b.height * a

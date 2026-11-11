@@ -66,8 +66,33 @@ final class H264Decoder {
     }
 }
 
-/// Converts decoded frames to RGB, upscales them with MetalFX to the view's native pixel size and
-/// presents them. Falls back to plain linear filtering if MetalFX isn't available.
+enum Upscaler: String, CaseIterable {
+    case metalfx, lanczos, bicubic, bilinear, integer
+
+    var label: String {
+        switch self {
+        case .metalfx: return "MetalFX (FSR-style)"
+        case .lanczos: return "Lanczos-3"
+        case .bicubic: return "Bicubic"
+        case .bilinear: return "Bilinear"
+        case .integer: return "Integer (pixel-perfect)"
+        }
+    }
+}
+
+/// Render settings, read on the render thread.
+struct RenderSettings {
+    var upscaler: Upscaler = .metalfx
+    /// FSR 1.0 RCAS sharpening strength, 0...1.
+    var sharpness: Float = 0.25
+    /// Luma-guided chroma upsampling (removes colour fringes on sharp edges).
+    var chromaGuide = true
+}
+
+/// Turns decoded NV12 frames into a sharp picture at the screen's native pixel size:
+/// 1. YUV -> RGB with luma-guided chroma upsampling (compute shader)
+/// 2. upscale with the chosen algorithm into a texture at output size
+/// 3. present with FSR 1.0 RCAS sharpening
 final class MetalVideoView: UIView {
     override class var layerClass: AnyClass { CAMetalLayer.self }
 
@@ -76,22 +101,31 @@ final class MetalVideoView: UIView {
     private let queue: MTLCommandQueue?
     private var textureCache: CVMetalTextureCache?
     private var convertPipeline: MTLComputePipelineState?
+    private var upscalePipelines: [Upscaler: MTLRenderPipelineState] = [:]
     private var presentPipeline: MTLRenderPipelineState?
 
-    // Recreated when the video or drawable size changes. Only touched on renderQueue.
+    // Only touched on renderQueue.
     private var rgbTexture: MTLTexture?
     private var scaledTexture: MTLTexture?
     private var scaler: MTLFXSpatialScaler?
-    private var scalerKey: (Int, Int, Int, Int) = (0, 0, 0, 0)
+    private var texturesKey = [Int]()
 
     private let renderQueue = DispatchQueue(label: "video.render", qos: .userInteractive)
+    private let lock = NSLock()
     private var latest: CVPixelBuffer?
     private var renderScheduled = false
-    private let lock = NSLock()
     private var drawableSize = CGSize.zero
+    private var _settings = RenderSettings()
 
-    /// Use MetalFX upscaling (sharper) instead of linear filtering.
-    var useMetalFX = true
+    var settings: RenderSettings {
+        get { lock.lock(); defer { lock.unlock() }; return _settings }
+        set {
+            lock.lock()
+            _settings = newValue
+            lock.unlock()
+            redraw()
+        }
+    }
 
     var isMetalFXSupported: Bool {
         guard let device else { return false }
@@ -123,11 +157,18 @@ final class MetalVideoView: UIView {
         if let fn = library.makeFunction(name: "yuvToRgb") {
             convertPipeline = try? device.makeComputePipelineState(function: fn)
         }
-        let desc = MTLRenderPipelineDescriptor()
-        desc.vertexFunction = library.makeFunction(name: "fullscreenVertex")
-        desc.fragmentFunction = library.makeFunction(name: "presentFragment")
-        desc.colorAttachments[0].pixelFormat = .bgra8Unorm
-        presentPipeline = try? device.makeRenderPipelineState(descriptor: desc)
+        func pipeline(_ fragment: String, format: MTLPixelFormat) -> MTLRenderPipelineState? {
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = library.makeFunction(name: "fullscreenVertex")
+            desc.fragmentFunction = library.makeFunction(name: fragment)
+            desc.colorAttachments[0].pixelFormat = format
+            return try? device.makeRenderPipelineState(descriptor: desc)
+        }
+        upscalePipelines[.bilinear] = pipeline("upscaleBilinear", format: .rgba8Unorm)
+        upscalePipelines[.bicubic] = pipeline("upscaleBicubic", format: .rgba8Unorm)
+        upscalePipelines[.lanczos] = pipeline("upscaleLanczos", format: .rgba8Unorm)
+        upscalePipelines[.integer] = pipeline("upscaleNearest", format: .rgba8Unorm)
+        presentPipeline = pipeline("presentRCAS", format: .bgra8Unorm)
     }
 
     override func layoutSubviews() {
@@ -139,18 +180,15 @@ final class MetalVideoView: UIView {
         lock.lock()
         drawableSize = size
         lock.unlock()
+        redraw()
     }
 
     /// Thread-safe. Only the newest frame is rendered if frames arrive faster than we can draw.
     func display(_ pixelBuffer: CVPixelBuffer) {
         lock.lock()
         latest = pixelBuffer
-        let schedule = !renderScheduled
-        renderScheduled = true
         lock.unlock()
-        if schedule {
-            renderQueue.async { [weak self] in self?.renderLatest() }
-        }
+        redraw()
     }
 
     func clear() {
@@ -159,14 +197,26 @@ final class MetalVideoView: UIView {
         lock.unlock()
     }
 
+    /// Re-render the latest frame (e.g. after a settings or size change).
+    private func redraw() {
+        lock.lock()
+        let schedule = !renderScheduled && latest != nil
+        if schedule { renderScheduled = true }
+        lock.unlock()
+        if schedule {
+            renderQueue.async { [weak self] in self?.renderLatest() }
+        }
+    }
+
     private func renderLatest() {
         lock.lock()
         let pb = latest
         let target = drawableSize
+        let settings = _settings
         renderScheduled = false
         lock.unlock()
         guard let pb, target.width > 0, target.height > 0 else { return }
-        render(pb, target: target)
+        render(pb, target: target, settings: settings)
     }
 
     /// The CVMetalTexture must stay alive until the GPU is done reading the MTLTexture.
@@ -180,17 +230,14 @@ final class MetalVideoView: UIView {
         return (tex, cvTex)
     }
 
-    private func prepareTextures(videoW: Int, videoH: Int, outW: Int, outH: Int) {
+    private func prepareTextures(videoW: Int, videoH: Int, outW: Int, outH: Int, metalFX: Bool) {
         guard let device else { return }
-        let wantScaler = useMetalFX && isMetalFXSupported && (outW != videoW || outH != videoH)
-        let key = (videoW, videoH, wantScaler ? outW : 0, wantScaler ? outH : 0)
-        if key == scalerKey, rgbTexture != nil { return }
-        scalerKey = key
+        let key = [videoW, videoH, outW, outH, metalFX ? 1 : 0]
+        if key == texturesKey, rgbTexture != nil, scaledTexture != nil { return }
+        texturesKey = key
         scaler = nil
-        scaledTexture = nil
 
-        var scalerDesc: MTLFXSpatialScalerDescriptor?
-        if wantScaler {
+        if metalFX {
             let d = MTLFXSpatialScalerDescriptor()
             d.inputWidth = videoW
             d.inputHeight = videoH
@@ -200,7 +247,6 @@ final class MetalVideoView: UIView {
             d.outputTextureFormat = .rgba8Unorm
             d.colorProcessingMode = .perceptual // the RGB values are gamma-encoded, not linear
             scaler = d.makeSpatialScaler(device: device)
-            scalerDesc = d
         }
 
         let rgbDesc = MTLTextureDescriptor.texture2DDescriptor(
@@ -211,17 +257,16 @@ final class MetalVideoView: UIView {
         rgbDesc.storageMode = .private
         rgbTexture = device.makeTexture(descriptor: rgbDesc)
 
-        if let scaler, scalerDesc != nil {
-            let outDesc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba8Unorm, width: outW, height: outH, mipmapped: false
-            )
-            outDesc.usage = scaler.outputTextureUsage.union(.shaderRead)
-            outDesc.storageMode = .private
-            scaledTexture = device.makeTexture(descriptor: outDesc)
-        }
+        let outDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: outW, height: outH, mipmapped: false
+        )
+        outDesc.usage = [.shaderRead, .renderTarget]
+        if let scaler { outDesc.usage.formUnion(scaler.outputTextureUsage) }
+        outDesc.storageMode = .private
+        scaledTexture = device.makeTexture(descriptor: outDesc)
     }
 
-    private func render(_ pb: CVPixelBuffer, target: CGSize) {
+    private func render(_ pb: CVPixelBuffer, target: CGSize, settings: RenderSettings) {
         guard let queue, let convertPipeline, let presentPipeline,
               let yPlane = texture(pb, plane: 0, format: .r8Unorm),
               let cPlane = texture(pb, plane: 1, format: .rg8Unorm) else { return }
@@ -229,8 +274,11 @@ final class MetalVideoView: UIView {
         let (cTex, cRef) = cPlane
         let videoW = CVPixelBufferGetWidth(pb)
         let videoH = CVPixelBufferGetHeight(pb)
-        prepareTextures(videoW: videoW, videoH: videoH, outW: Int(target.width), outH: Int(target.height))
-        guard let rgbTexture, let cmd = queue.makeCommandBuffer() else { return }
+        let outW = Int(target.width), outH = Int(target.height)
+        var upscaler = settings.upscaler
+        if upscaler == .metalfx && !isMetalFXSupported { upscaler = .lanczos }
+        prepareTextures(videoW: videoW, videoH: videoH, outW: outW, outH: outH, metalFX: upscaler == .metalfx)
+        guard let rgbTexture, let scaledTexture, let cmd = queue.makeCommandBuffer() else { return }
 
         // 1. YUV -> RGB at video resolution
         if let enc = cmd.makeComputeCommandEncoder() {
@@ -238,24 +286,36 @@ final class MetalVideoView: UIView {
             enc.setTexture(yTex, index: 0)
             enc.setTexture(cTex, index: 1)
             enc.setTexture(rgbTexture, index: 2)
+            // sigma = 0.05 in normalized luma, tuned on a sharp-edge test pattern
+            var inv2Sigma2: Float = settings.chromaGuide ? 1 / (2 * 0.05 * 0.05) : 0
+            enc.setBytes(&inv2Sigma2, length: MemoryLayout<Float>.size, index: 0)
             let tg = MTLSize(width: 16, height: 16, depth: 1)
             let groups = MTLSize(width: (videoW + 15) / 16, height: (videoH + 15) / 16, depth: 1)
             enc.dispatchThreadgroups(groups, threadsPerThreadgroup: tg)
             enc.endEncoding()
         }
 
-        // 2. MetalFX upscale to the screen's native pixel size
-        var source: MTLTexture = rgbTexture
-        if let scaler, let scaledTexture {
+        // 2. Upscale to the output's native pixel size
+        if upscaler == .metalfx, let scaler {
             scaler.colorTexture = rgbTexture
             scaler.outputTexture = scaledTexture
             scaler.inputContentWidth = videoW
             scaler.inputContentHeight = videoH
             scaler.encode(commandBuffer: cmd)
-            source = scaledTexture
+        } else if let pipeline = upscalePipelines[upscaler] {
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = scaledTexture
+            pass.colorAttachments[0].loadAction = .dontCare
+            pass.colorAttachments[0].storeAction = .store
+            if let enc = cmd.makeRenderCommandEncoder(descriptor: pass) {
+                enc.setRenderPipelineState(pipeline)
+                enc.setFragmentTexture(rgbTexture, index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                enc.endEncoding()
+            }
         }
 
-        // 3. Present (1:1 when upscaled, linear filtering otherwise)
+        // 3. Sharpen (FSR 1.0 RCAS) and present
         guard let drawable = metalLayer.nextDrawable() else { return }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
@@ -263,7 +323,10 @@ final class MetalVideoView: UIView {
         pass.colorAttachments[0].storeAction = .store
         if let enc = cmd.makeRenderCommandEncoder(descriptor: pass) {
             enc.setRenderPipelineState(presentPipeline)
-            enc.setFragmentTexture(source, index: 0)
+            enc.setFragmentTexture(scaledTexture, index: 0)
+            // pixel-perfect output shouldn't be sharpened
+            var sharpness: Float = upscaler == .integer ? 0 : settings.sharpness
+            enc.setFragmentBytes(&sharpness, length: MemoryLayout<Float>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
