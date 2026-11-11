@@ -24,7 +24,8 @@ jobs:
           choco install -y --no-progress nodejs.install
           npm install -g typescript@5.5.4
           choco install -y --no-progress 7zip
-          Invoke-WebRequest -Uri https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.0.1-full_build-shared.7z -OutFile ffmpeg.7z
+          # gyan.dev only hosts current builds; fixed versions live in its GitHub archive
+          Invoke-WebRequest -Uri https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build-shared.7z -OutFile ffmpeg.7z
           7z x ffmpeg.7z
           del .\ffmpeg-8.0.1-full_build-shared\bin\*.exe
           $env:INCLUDE = ".\ffmpeg-8.0.1-full_build-shared\include\;" + $env:INCLUDE
@@ -89,7 +90,8 @@ jobs:
         run: |
           npm install -g typescript@5.5.4
           brew install nasm
-          cargo install cargo-bundle
+          # --locked: build with the dependency versions it was released with (newer ones fail to compile)
+          cargo install --locked cargo-bundle
         shell: bash
       - name: Build
         # run: MACOSX_DEPLOYMENT_TARGET=10.13 cargo bundle --release
