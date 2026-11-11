@@ -34,8 +34,9 @@ final class Prefs: ObservableObject {
     // Video
     /// "mirror" an existing screen, or "extend" the desktop with a virtual display at the iPad's resolution.
     @Published var displayMode: String { didSet { save(displayMode, "displayMode") } }
-    /// UI scale of the virtual display (2 = same size as iPad apps).
-    @Published var extendScale: Double { didSet { save(extendScale, "extendScale") } }
+    /// Virtual display resolution: "half" (iPad's pixels / 2, shown pixel-doubled: right-sized UI
+    /// and 60 fps on weak GPUs) or "native" (every iPad pixel: sharpest, but tiny UI and heavier).
+    @Published var extendResolution: String { didSet { save(extendResolution, "extendResolution") } }
     @Published var showVideo: Bool { didSet { save(showVideo, "showVideo") } }
     @Published var frameRate: Int { didSet { save(frameRate, "frameRate") } }
     @Published var showCursor: Bool { didSet { save(showCursor, "showCursor") } }
@@ -83,7 +84,7 @@ final class Prefs: ObservableObject {
         aspect = d.string(forKey: "aspect") ?? "16:9"
         hoverEnabled = d.object(forKey: "hoverEnabled") as? Bool ?? true
         displayMode = d.string(forKey: "displayMode") ?? "mirror"
-        extendScale = d.object(forKey: "extendScale") as? Double ?? 2.0
+        extendResolution = d.string(forKey: "extendResolution") ?? "half"
         showVideo = d.object(forKey: "showVideo") as? Bool ?? true
         frameRate = d.object(forKey: "frameRate") as? Int ?? 30
         // Off by default: the iPad draws its own cursor at the Pencil instantly, and cursor

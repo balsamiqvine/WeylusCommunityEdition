@@ -172,15 +172,16 @@ final class WeylusClient: ObservableObject {
     func startExtend() {
         guard isOpen, let size = extendSize, size.width >= 320, size.height >= 240 else { return }
         let prefs = Prefs.shared
-        // even dimensions keep the encoder and every scale factor happy
-        let w = Int(size.width) / 2 * 2, h = Int(size.height) / 2 * 2
+        // Half resolution is shown pixel-doubled. Even dimensions keep the encoder happy.
+        let divisor = prefs.extendResolution == "half" ? 2 : 1
+        let w = Int(size.width) / divisor / 2 * 2, h = Int(size.height) / divisor / 2 * 2
         selected = nil
         extending = true
         sendRaw("""
         {"Config":{"uinput_support":true,"capturable_id":0,"capture_cursor":\(prefs.showCursor),\
         "max_width":\(w),"max_height":\(h),"client_name":"Pencil","frame_rate":\(prefs.frameRate),\
         "keyframe_interval":\(Self.keyframeInterval),"quality_qp":\(prefs.qualityQP),\
-        "virtual_display":{"width":\(w),"height":\(h),"scale":\(prefs.extendScale)}}}
+        "virtual_display":{"width":\(w),"height":\(h)}}}
         """)
         sendRaw(prefs.showVideo ? "\"ResumeVideo\"" : "\"PauseVideo\"")
         status = .ready

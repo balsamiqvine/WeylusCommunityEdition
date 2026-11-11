@@ -173,7 +173,7 @@ final class MetalVideoView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let scale = window?.screen.scale ?? UIScreen.main.scale
+        let scale = window?.screen.nativeScale ?? UIScreen.main.nativeScale
         metalLayer.contentsScale = scale
         let size = CGSize(width: (bounds.width * scale).rounded(), height: (bounds.height * scale).rounded())
         metalLayer.drawableSize = size

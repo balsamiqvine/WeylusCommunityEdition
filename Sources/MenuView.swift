@@ -66,12 +66,11 @@ struct MenuView: View {
             }
             .onChange(of: prefs.displayMode) { client.applyDisplayMode() }
             if prefs.displayMode == "extend" {
-                Picker("UI size", selection: $prefs.extendScale) {
-                    Text("Large (2×, like iPad apps)").tag(2.0)
-                    Text("Medium (1.33×)").tag(1.33)
-                    Text("Small (1×, most space)").tag(1.0)
+                Picker("Resolution", selection: $prefs.extendResolution) {
+                    Text("Half, pixel-doubled (smooth)").tag("half")
+                    Text("Native (sharpest, slower)").tag("native")
                 }
-                .onChange(of: prefs.extendScale) { client.updateVideoSettings() }
+                .onChange(of: prefs.extendResolution) { client.updateVideoSettings() }
             }
             if prefs.displayMode == "mirror" && !client.capturables.isEmpty {
                 Picker("Screen", selection: Binding(

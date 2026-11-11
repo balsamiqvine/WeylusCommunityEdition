@@ -163,7 +163,7 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
         // to the screen's pixel grid. Falls back to a normal fit if even 1x doesn't fit.
         if prefs.upscaler == Upscaler.integer.rawValue, prefs.showVideo,
            let v = client.videoSize, v.width > 0, v.height > 0 {
-            let scale = window?.screen.scale ?? UIScreen.main.scale
+            let scale = window?.screen.nativeScale ?? UIScreen.main.nativeScale
             let k = floor(min(b.width * scale / v.width, b.height * scale / v.height))
             if k >= 1 {
                 let w = v.width * k / scale, h = v.height * k / scale
@@ -185,7 +185,7 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
     override func layoutSubviews() {
         super.layoutSubviews()
         // In extend mode the virtual display is created to fill everything beside the bar.
-        let scale = window?.screen.scale ?? UIScreen.main.scale
+        let scale = window?.screen.nativeScale ?? UIScreen.main.nativeScale
         let content = contentRect
         client.extendSize = CGSize(width: (content.width * scale).rounded(), height: (content.height * scale).rounded())
         areaLayer.frame = bounds
