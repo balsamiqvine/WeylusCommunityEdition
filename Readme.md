@@ -1,3 +1,26 @@
+# Weylus + Weylus Pencil (fork)
+
+This fork of [Weylus Community Edition](https://github.com/electronstudio/WeylusCommunityEdition)
+adds a native iPad client and makes Weylus work well as an Apple Pencil drawing tablet on Linux
+(GNOME/Wayland), in the spirit of Astropad.
+
+**Weylus server changes**
+- Pen: correct tilt range, no lost light strokes on tablets without hover, pressure curve and
+  stroke smoothing in the web client.
+- Video: zero-copy PipeWire capture (DMA-BUF straight into VAAPI), FFmpeg 7.1+/8 fix for VAAPI
+  filters, correct BT.709 full-range colour tags, encoding only when the screen changed,
+  per-client keyframe interval and quality.
+- Virtual displays: use the tablet as an extra screen at its own resolution through Mutter
+  (GNOME), with pen and touch mapped to it.
+
+**Weylus Pencil (`ios/`)**: native iPadOS app with 240 Hz Pencil input (pressure, tilt, hover,
+barrel roll), Pencil Pro squeeze/double-tap shortcuts, hardware video decoding with MetalFX/Lanczos
+upscaling and clean colour edges, touch input with palm rejection, a shortcut bar, mirror and
+extend modes, and a wired USB mode (`ios/tools/weylus-usb-bridge.py`). Unsigned IPAs are built
+by GitHub Actions; see [ios/README.md](ios/README.md).
+
+---
+
 **Please checkout my new project [Inara](https://github.com/electronstudio/desktop_remote_mobile_companion) - it does some of the same things Weylus does!**
 
 # Weylus Community Edition

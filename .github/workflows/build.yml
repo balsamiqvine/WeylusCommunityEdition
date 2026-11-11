@@ -5,8 +5,11 @@ on:
     branches: ["*"]
     tags:
       - v*
+    # the iPad client is built by ios.yml
+    paths-ignore: ["ios/**", ".github/workflows/ios.yml"]
   pull_request:
     branches: [master]
+    paths-ignore: ["ios/**", ".github/workflows/ios.yml"]
 
 jobs:
   build-windows:

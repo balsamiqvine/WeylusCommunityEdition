@@ -1,8 +1,8 @@
 # Weylus Pencil
 
-A native iPad client for [Weylus Community Edition](https://github.com/electronstudio/WeylusCommunityEdition)
-focused on Apple Pencil input. It speaks Weylus' existing WebSocket protocol, so nothing needs to
-change on the computer.
+A native iPad client for Weylus, focused on Apple Pencil input. It speaks Weylus' WebSocket
+protocol; quality settings, zero-copy capture and extend mode need the Weylus server from this
+repository.
 
 ## Features (v0.1, input only — no screen mirroring yet)
 
@@ -16,8 +16,8 @@ change on the computer.
 
 ## Building
 
-There's no Mac needed: GitHub Actions builds an unsigned IPA on every push
-(Actions tab → latest run → `WeylusPencil-ipa` artifact). Install it with LiveContainer,
+There's no Mac needed: GitHub Actions builds an unsigned IPA on every push that touches `ios/`
+(Actions tab → "Weylus Pencil (iPad)" → latest run → `WeylusPencil-ipa` artifact). Install it with LiveContainer,
 SideStore, AltStore or similar.
 
 Locally on a Mac: `brew install xcodegen && xcodegen generate && open WeylusPencil.xcodeproj`.

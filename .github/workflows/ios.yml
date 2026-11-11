@@ -1,13 +1,19 @@
-name: Build IPA
+name: Weylus Pencil (iPad)
 
 on:
   push:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  pull_request:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ios
     steps:
       - uses: actions/checkout@v4
 
@@ -40,10 +46,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: WeylusPencil-ipa
-          path: WeylusPencil.ipa
+          path: ios/WeylusPencil.ipa
 
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: xcodebuild-log
-          path: xcodebuild.log
+          path: ios/xcodebuild.log
