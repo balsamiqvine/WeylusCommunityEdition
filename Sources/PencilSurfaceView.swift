@@ -10,7 +10,8 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
     private let client = WeylusClient.shared
     private let prefs = Prefs.shared
     private let areaLayer = CAShapeLayer()
-    private let videoView = VideoLayerView()
+    private let videoView = MetalVideoView()
+    private let decoder = H264Decoder()
     private var activeTouch: UITouch?
     private var hovering = false
     private var lastHover: PenSample?
@@ -31,8 +32,19 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
         isMultipleTouchEnabled = true
 
         addSubview(videoView)
-        client.videoSink = { [weak self] sample in self?.videoView.enqueue(sample) }
-        client.onVideoReset = { [weak self] in self?.videoView.clear() }
+        decoder.onFrame = { [weak self] pb in self?.videoView.display(pb) }
+        decoder.onError = { [weak self] in
+            DispatchQueue.main.async { self?.client.requestKeyframe() }
+        }
+        client.videoSink = { [weak self] sample in self?.decoder.decode(sample) }
+        client.onVideoReset = { [weak self] in
+            self?.decoder.reset()
+            self?.videoView.clear()
+        }
+        videoView.useMetalFX = prefs.sharpUpscaling
+        prefs.$sharpUpscaling
+            .sink { [weak self] on in self?.videoView.useMetalFX = on }
+            .store(in: &cancellables)
 
         areaLayer.fillColor = UIColor.clear.cgColor
         areaLayer.strokeColor = UIColor(white: 1, alpha: 0.25).cgColor

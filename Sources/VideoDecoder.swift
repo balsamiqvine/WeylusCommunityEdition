@@ -1,9 +1,8 @@
-import AVFoundation
 import CoreMedia
 import UIKit
 
 /// Turns Weylus' fragmented MP4 stream (init segment, then one moof+mdat per frame) into
-/// CMSampleBuffers that AVSampleBufferDisplayLayer decodes in hardware.
+/// CMSampleBuffers for the hardware decoder.
 /// The stream arrives in arbitrary chunks, so boxes are reassembled from a byte buffer.
 final class FragmentedMP4Parser {
     private var buffer: [UInt8] = []
@@ -200,35 +199,5 @@ final class FragmentedMP4Parser {
 
     private static func fourcc(_ b: [UInt8], _ o: Int) -> String {
         String(bytes: b[o..<(o + 4)], encoding: .ascii) ?? "????"
-    }
-}
-
-/// A view backed by AVSampleBufferDisplayLayer, which decodes H.264 in hardware.
-final class VideoLayerView: UIView {
-    override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
-
-    var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isUserInteractionEnabled = false
-        backgroundColor = .black
-        displayLayer.videoGravity = .resize // the view itself is sized to the video's aspect ratio
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is not used")
-    }
-
-    func enqueue(_ sample: CMSampleBuffer) {
-        let renderer = displayLayer.sampleBufferRenderer
-        if renderer.status == .failed {
-            renderer.flush()
-        }
-        renderer.enqueue(sample)
-    }
-
-    func clear() {
-        displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
     }
 }

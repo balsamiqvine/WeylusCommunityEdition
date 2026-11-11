@@ -33,6 +33,10 @@ final class Prefs: ObservableObject {
     @Published var showVideo: Bool { didSet { save(showVideo, "showVideo") } }
     @Published var frameRate: Int { didSet { save(frameRate, "frameRate") } }
     @Published var showCursor: Bool { didSet { save(showCursor, "showCursor") } }
+    /// Encoder quantizer: lower is sharper but needs more bandwidth.
+    @Published var qualityQP: Int { didSet { save(qualityQP, "qualityQP") } }
+    /// Upscale with MetalFX instead of plain linear filtering.
+    @Published var sharpUpscaling: Bool { didSet { save(sharpUpscaling, "sharpUpscaling") } }
 
     // Pencil Pro gestures
     @Published var tapShortcut: String { didSet { save(tapShortcut, "tapShortcut") } }
@@ -56,6 +60,8 @@ final class Prefs: ObservableObject {
         showVideo = d.object(forKey: "showVideo") as? Bool ?? true
         frameRate = d.object(forKey: "frameRate") as? Int ?? 30
         showCursor = d.object(forKey: "showCursor") as? Bool ?? true
+        qualityQP = d.object(forKey: "qualityQP") as? Int ?? 18
+        sharpUpscaling = d.object(forKey: "sharpUpscaling") as? Bool ?? true
         tapShortcut = d.string(forKey: "tapShortcut") ?? "e"
         squeezeShortcut = d.string(forKey: "squeezeShortcut") ?? "ctrl+z"
         squeezeHold = d.object(forKey: "squeezeHold") as? Bool ?? false

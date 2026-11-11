@@ -115,6 +115,12 @@ struct MenuView: View {
                 Text("30 fps").tag(30)
                 Text("60 fps").tag(60)
             }
+            Picker("Picture quality", selection: $prefs.qualityQP) {
+                Text("Standard").tag(23)
+                Text("High").tag(18)
+                Text("Very high").tag(14)
+            }
+            Toggle("Sharp upscaling (MetalFX)", isOn: $prefs.sharpUpscaling)
             Toggle("Show mouse cursor", isOn: $prefs.showCursor)
             if let size = client.videoSize {
                 LabeledContent("Stream", value: "\(Int(size.width))×\(Int(size.height))")
@@ -122,11 +128,12 @@ struct MenuView: View {
         } header: {
             Text("Video")
         } footer: {
-            Text("Turn the screen off to use the iPad as a plain drawing tablet and save battery and laptop CPU. Higher frame rates cost more laptop CPU.")
+            Text("Higher quality looks sharper but uses more Wi-Fi bandwidth when the screen changes a lot. Sharp upscaling uses Apple's MetalFX to fit the picture to the iPad's resolution. Turn the screen off to use the iPad as a plain drawing tablet.")
         }
         .onChange(of: prefs.showVideo) { client.updateVideoSettings() }
         .onChange(of: prefs.frameRate) { client.updateVideoSettings() }
         .onChange(of: prefs.showCursor) { client.updateVideoSettings() }
+        .onChange(of: prefs.qualityQP) { client.updateVideoSettings() }
     }
 
     private var mapping: some View {

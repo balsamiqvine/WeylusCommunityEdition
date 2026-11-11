@@ -107,11 +107,24 @@ final class WeylusClient: ObservableObject {
         let prefs = Prefs.shared
         let config = """
         {"Config":{"uinput_support":true,"capturable_id":\(index),"capture_cursor":\(prefs.showCursor),\
-        "max_width":1920,"max_height":1080,"client_name":"Pencil","frame_rate":\(prefs.frameRate)}}
+        "max_width":1920,"max_height":1080,"client_name":"Pencil","frame_rate":\(prefs.frameRate),\
+        "keyframe_interval":\(Self.keyframeInterval),"quality_qp":\(prefs.qualityQP)}}
         """
         sendRaw(config)
         sendRaw(prefs.showVideo ? "\"ResumeVideo\"" : "\"PauseVideo\"")
         status = .ready
+    }
+
+    /// The connection is TCP, so nothing is ever lost and keyframes are only needed to start a
+    /// stream; one a minute is a safety net. Fewer keyframes = more bits for picture quality.
+    private static let keyframeInterval = 1800
+    private var lastKeyframeRequest = Date.distantPast
+
+    /// Ask Weylus to restart the stream (which begins with a keyframe), at most once a second.
+    func requestKeyframe() {
+        guard isLive, Date().timeIntervalSince(lastKeyframeRequest) > 1 else { return }
+        lastKeyframeRequest = Date()
+        sendRaw("\"RestartVideo\"")
     }
 
     /// Apply changed video settings (on/off, frame rate, cursor) to the running stream.
