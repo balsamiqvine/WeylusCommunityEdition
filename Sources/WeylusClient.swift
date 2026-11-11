@@ -140,6 +140,19 @@ final class WeylusClient: ObservableObject {
         for s in samples { sendRaw(Self.pointerJSON(s)) }
     }
 
+    /// A finger on the touchscreen. `size` is the contact diameter relative to the mapped area's
+    /// diagonal, as Weylus' web client reports it.
+    func sendTouch(type: String, id: Int, x: Double, y: Double, size: Double, touching: Bool, timestamp: UInt64) {
+        guard isLive else { return }
+        let button = (type == "pointerdown" || type == "pointerup") ? 1 : 0
+        sendRaw("{\"PointerEvent\":{\"event_type\":\"\(type)\",\"pointer_id\":\(id),"
+            + "\"timestamp\":\(timestamp),\"is_primary\":false,\"pointer_type\":\"touch\","
+            + "\"button\":\(button),\"buttons\":\(touching ? 1 : 0),"
+            + "\"x\":\(Self.num(x)),\"y\":\(Self.num(y)),\"pressure\":\(touching ? "0.5" : "0"),"
+            + "\"tilt_x\":0,\"tilt_y\":0,\"twist\":0,"
+            + "\"width\":\(Self.num(size)),\"height\":\(Self.num(size))}}")
+    }
+
     func keyDown(_ sc: Shortcut) {
         for m in sc.modifiers { sendKey("down", m) }
         sendKey("down", sc.key)

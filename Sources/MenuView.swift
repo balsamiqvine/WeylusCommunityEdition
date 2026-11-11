@@ -13,9 +13,11 @@ struct MenuView: View {
                 pressure
                 smoothing
                 mapping
+                touch
+                shortcutBar
                 gestures
                 Section {
-                    Text("Three-finger tap anywhere to come back to this menu. Fingers are otherwise ignored, so you can rest your palm.")
+                    Text("Tap Menu in the shortcut bar or four-finger tap anywhere to come back here.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -153,6 +155,48 @@ struct MenuView: View {
         }
     }
 
+    private var touch: some View {
+        Section {
+            Picker("Fingers", selection: $prefs.touchMode) {
+                Text("Ignore").tag("off")
+                Text("Tap shortcuts").tag("gestures")
+                Text("Touchscreen").tag("touchscreen")
+            }
+            if prefs.touchMode == "gestures" {
+                ShortcutField(title: "Two-finger tap", text: $prefs.twoFingerTap)
+                ShortcutField(title: "Three-finger tap", text: $prefs.threeFingerTap)
+            }
+        } header: {
+            Text("Touch")
+        } footer: {
+            switch prefs.touchMode {
+            case "touchscreen":
+                Text("Fingers act as a touchscreen on the computer, so apps with touch support (like Krita) can pan, zoom and rotate. Touches are ignored while the Pencil is drawing or hovering, and large contacts like palms are rejected.")
+            case "gestures":
+                Text("Finger taps trigger shortcuts on the iPad side, which works in any app. Fingers never reach the computer, so palms can't make marks.")
+            default:
+                Text("Fingers are ignored, except the four-finger tap for this menu.")
+            }
+        }
+    }
+
+    private var shortcutBar: some View {
+        Section {
+            Picker("Position", selection: $prefs.barSide) {
+                Text("Left").tag("left")
+                Text("Right").tag("right")
+                Text("Hidden").tag("hidden")
+            }
+            NavigationLink("Buttons") {
+                ControlsEditor(prefs: prefs)
+            }
+        } header: {
+            Text("Shortcut bar")
+        } footer: {
+            Text("Buttons along the screen edge. \"Hold\" buttons keep their keys pressed while you touch them, so you can hold e.g. ctrl with a finger and draw with the Pencil.")
+        }
+    }
+
     private var gestures: some View {
         Section {
             ShortcutField(title: "Double-tap", text: $prefs.tapShortcut)
@@ -242,5 +286,39 @@ private struct CurvePreview: View {
             ctx.stroke(curve, with: .color(.accentColor), lineWidth: 2)
         }
         .accessibilityLabel("Pressure curve preview")
+    }
+}
+
+private struct ControlsEditor: View {
+    @ObservedObject var prefs: Prefs
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach($prefs.controls) { $control in
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("Label", text: $control.label)
+                            .font(.headline)
+                        ShortcutField(title: "Keys", text: $control.shortcut)
+                        Toggle("Hold while pressed", isOn: $control.hold)
+                    }
+                    .padding(.vertical, 4)
+                }
+                .onDelete { prefs.controls.remove(atOffsets: $0) }
+                .onMove { prefs.controls.move(fromOffsets: $0, toOffset: $1) }
+                Button("Add button") {
+                    prefs.controls.append(ControlButton(label: "New", shortcut: "", hold: false))
+                }
+            } footer: {
+                Text("Keys like e, ctrl+z, ctrl+shift+z, [, space or a lone modifier such as ctrl. Swipe to delete, Edit to reorder.")
+            }
+            Section {
+                Button("Reset to defaults", role: .destructive) {
+                    prefs.controls = ControlButton.defaults
+                }
+            }
+        }
+        .navigationTitle("Shortcut buttons")
+        .toolbar { EditButton() }
     }
 }

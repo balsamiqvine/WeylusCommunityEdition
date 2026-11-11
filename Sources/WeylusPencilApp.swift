@@ -21,7 +21,7 @@ struct RootView: View {
             .defersSystemGestures(on: .all) // don't let edge swipes eat strokes near the border
             .overlay(alignment: .top) {
                 if !showMenu && !client.isLive {
-                    Text("Not connected. Three-finger tap for the menu.")
+                    Text("Not connected. Tap Menu or four-finger tap for the menu.")
                         .font(.footnote)
                         .padding(8)
                         .background(.ultraThinMaterial, in: Capsule())

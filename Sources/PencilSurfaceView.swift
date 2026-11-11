@@ -1,8 +1,8 @@
 import UIKit
 import Combine
 
-/// Full-screen surface that turns Apple Pencil input into Weylus pen events.
-/// Fingers are ignored (no palm problems), except a three-finger tap which opens the menu.
+/// Full-screen surface that turns Apple Pencil and finger input into Weylus events, shows the
+/// computer's screen and hosts the shortcut bar.
 final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
     var onMenuGesture: (() -> Void)?
 
@@ -12,7 +12,14 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
     private let areaLayer = CAShapeLayer()
     private let videoView = MetalVideoView()
     private let decoder = H264Decoder()
+    private let bar = ShortcutBarView()
     private var activeTouch: UITouch?
+    /// Fingers currently forwarded to the computer, with their Weylus pointer ids.
+    private var fingers: [ObjectIdentifier: Int] = [:]
+    private var nextFingerID = 100
+    private var lastPencilActivity = Date.distantPast
+    private var twoFingerTap: UITapGestureRecognizer!
+    private var threeFingerTap: UITapGestureRecognizer!
     private var hovering = false
     private var lastHover: PenSample?
     private var cancellables = Set<AnyCancellable>()
@@ -32,6 +39,8 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
         isMultipleTouchEnabled = true
 
         addSubview(videoView)
+        addSubview(bar)
+        bar.onMenu = { [weak self] in self?.onMenuGesture?() }
         decoder.onFrame = { [weak self] pb in self?.videoView.display(pb) }
         decoder.onError = { [weak self] in
             DispatchQueue.main.async { self?.client.requestKeyframe() }
@@ -59,22 +68,48 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
         pencil.delegate = self
         addInteraction(pencil)
 
-        let menuTap = UITapGestureRecognizer(target: self, action: #selector(onMenuTap))
-        menuTap.numberOfTouchesRequired = 3
-        menuTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-        menuTap.cancelsTouchesInView = false
-        addGestureRecognizer(menuTap)
+        func fingerTap(_ n: Int, _ action: Selector) -> UITapGestureRecognizer {
+            let g = UITapGestureRecognizer(target: self, action: action)
+            g.numberOfTouchesRequired = n
+            g.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+            g.cancelsTouchesInView = false
+            addGestureRecognizer(g)
+            return g
+        }
+        let menuTap = fingerTap(4, #selector(onMenuTap))
+        threeFingerTap = fingerTap(3, #selector(onThreeFingerTap))
+        twoFingerTap = fingerTap(2, #selector(onTwoFingerTap))
+        twoFingerTap.require(toFail: threeFingerTap)
+        threeFingerTap.require(toFail: menuTap)
 
         let relayout: (Any) -> Void = { [weak self] _ in
             DispatchQueue.main.async { self?.setNeedsLayout() }
         }
         prefs.$aspect.sink(receiveValue: relayout).store(in: &cancellables)
         prefs.$showVideo.sink(receiveValue: relayout).store(in: &cancellables)
+        prefs.$barSide.sink(receiveValue: relayout).store(in: &cancellables)
+        prefs.$touchMode
+            .sink { [weak self] mode in
+                // Gestures are recognised on the iPad only in "gestures" mode; in touchscreen
+                // mode the computer's app gets the raw touches and handles gestures itself.
+                self?.twoFingerTap.isEnabled = mode == "gestures"
+                self?.threeFingerTap.isEnabled = mode == "gestures"
+                if mode != "touchscreen" { self?.cancelFingers() }
+            }
+            .store(in: &cancellables)
         client.$videoSize.sink(receiveValue: relayout).store(in: &cancellables)
     }
 
     @objc private func onMenuTap() {
         onMenuGesture?()
+    }
+
+    @objc private func onTwoFingerTap() {
+        if let sc = Shortcut.parse(prefs.twoFingerTap) { client.press(sc) }
+    }
+
+    @objc private func onThreeFingerTap() {
+        if let sc = Shortcut.parse(prefs.threeFingerTap) { client.press(sc) }
     }
 
     // MARK: Mapping
@@ -89,8 +124,20 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
 
     /// The part of the iPad that maps onto the computer's screen. Matching the screen's shape
     /// keeps circles round; the rest of the iPad is dead space.
+    /// Everything except the shortcut bar.
+    private var contentRect: CGRect {
+        switch prefs.barSide {
+        case "left":
+            return bounds.inset(by: UIEdgeInsets(top: 0, left: ShortcutBarView.width, bottom: 0, right: 0))
+        case "right":
+            return bounds.inset(by: UIEdgeInsets(top: 0, left: 0, bottom: 0, right: ShortcutBarView.width))
+        default:
+            return bounds
+        }
+    }
+
     private var activeArea: CGRect {
-        let b = bounds
+        let b = contentRect
         guard let a = targetAspect, b.width > 0, b.height > 0 else { return b }
         if b.width / b.height > a {
             let w = b.height * a
@@ -104,12 +151,16 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
     override func layoutSubviews() {
         super.layoutSubviews()
         areaLayer.frame = bounds
+        bar.isHidden = prefs.barSide == "hidden"
+        bar.frame = prefs.barSide == "right"
+            ? CGRect(x: bounds.maxX - ShortcutBarView.width, y: 0, width: ShortcutBarView.width, height: bounds.height)
+            : CGRect(x: 0, y: 0, width: ShortcutBarView.width, height: bounds.height)
         let area = activeArea
         let videoShowing = prefs.showVideo && client.videoSize != nil
         videoView.frame = area
         videoView.isHidden = !prefs.showVideo
         // The video itself shows where the screen is; only outline the area without it.
-        areaLayer.path = area == bounds || videoShowing
+        areaLayer.path = area == contentRect || videoShowing
             ? nil
             : UIBezierPath(rect: area.insetBy(dx: 0.5, dy: 0.5)).cgPath
     }
@@ -150,25 +201,33 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
         )
     }
 
-    // MARK: Touches (pencil only)
+    // MARK: Touches
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard activeTouch == nil, let t = touches.first(where: { $0.type == .pencil }) else { return }
-        activeTouch = t
-        hovering = false
-        client.send(filter.down(sample(t, type: "pointerdown", touching: true)))
+        for t in touches {
+            if t.type == .pencil {
+                pencilBegan(t)
+            } else if t.type == .direct {
+                fingerBegan(t)
+            }
+        }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let t = activeTouch, touches.contains(t) else { return }
-        let size = activeArea.size
-        // Coalesced touches carry every 240 Hz sample, not just one per display frame.
-        let all = event?.coalescedTouches(for: t) ?? [t]
-        var out: [PenSample] = []
-        for c in all {
-            out += filter.move(sample(c, type: "pointermove", touching: true), size: size)
+        if let t = activeTouch, touches.contains(t) {
+            let size = activeArea.size
+            // Coalesced touches carry every 240 Hz sample, not just one per display frame.
+            let all = event?.coalescedTouches(for: t) ?? [t]
+            var out: [PenSample] = []
+            for c in all {
+                out += filter.move(sample(c, type: "pointermove", touching: true), size: size)
+            }
+            client.send(out)
+            lastPencilActivity = Date()
         }
-        client.send(out)
+        for t in touches where fingers[ObjectIdentifier(t)] != nil {
+            sendFinger(t, type: "pointermove", touching: true)
+        }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -180,9 +239,62 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
     }
 
     private func finish(_ touches: Set<UITouch>, type: String) {
-        guard let t = activeTouch, touches.contains(t) else { return }
-        activeTouch = nil
-        client.send(filter.up(sample(t, type: type, touching: false), size: activeArea.size))
+        if let t = activeTouch, touches.contains(t) {
+            activeTouch = nil
+            lastPencilActivity = Date()
+            client.send(filter.up(sample(t, type: type, touching: false), size: activeArea.size))
+        }
+        for t in touches where fingers[ObjectIdentifier(t)] != nil {
+            sendFinger(t, type: type, touching: false)
+            fingers[ObjectIdentifier(t)] = nil
+        }
+    }
+
+    private func pencilBegan(_ t: UITouch) {
+        guard activeTouch == nil else { return }
+        // A palm usually lands just before the Pencil does; drop any fingers still down.
+        cancelFingers()
+        activeTouch = t
+        hovering = false
+        lastPencilActivity = Date()
+        client.send(filter.down(sample(t, type: "pointerdown", touching: true)))
+    }
+
+    // MARK: Fingers (touchscreen mode)
+
+    private func fingerBegan(_ t: UITouch) {
+        guard prefs.touchMode == "touchscreen" else { return }
+        // Palm rejection: ignore fingers while the Pencil is drawing or was just used/hovering,
+        // and contacts too large to be a fingertip.
+        guard activeTouch == nil,
+              Date().timeIntervalSince(lastPencilActivity) > 0.5,
+              t.majorRadius < 35,
+              activeArea.contains(t.location(in: self)),
+              fingers.count < 5 else { return }
+        fingers[ObjectIdentifier(t)] = nextFingerID
+        nextFingerID += 1
+        sendFinger(t, type: "pointerdown", touching: true)
+    }
+
+    private func sendFinger(_ t: UITouch, type: String, touching: Bool) {
+        guard let id = fingers[ObjectIdentifier(t)] else { return }
+        let area = activeArea
+        let (x, y) = normalized(t.location(in: self))
+        let diagonal = hypot(area.width, area.height)
+        client.sendTouch(
+            type: type, id: id, x: x, y: y,
+            size: diagonal > 0 ? Double(t.majorRadius * 2 / diagonal) : 0,
+            touching: touching,
+            timestamp: UInt64(max(t.timestamp, 0) * 1_000_000)
+        )
+    }
+
+    private func cancelFingers() {
+        let now = UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000)
+        for id in fingers.values {
+            client.sendTouch(type: "pointercancel", id: id, x: 0, y: 0, size: 0, touching: false, timestamp: now)
+        }
+        fingers.removeAll()
     }
 
     // MARK: Hover (M2+ iPad Pro)
@@ -201,6 +313,7 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
             )
             hovering = true
             lastHover = s
+            lastPencilActivity = Date()
             client.send([s])
         case .ended, .cancelled:
             if hovering, var s = lastHover {

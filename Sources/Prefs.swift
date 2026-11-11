@@ -38,6 +38,20 @@ final class Prefs: ObservableObject {
     /// Upscale with MetalFX instead of plain linear filtering.
     @Published var sharpUpscaling: Bool { didSet { save(sharpUpscaling, "sharpUpscaling") } }
 
+    // Touch and on-screen controls
+    /// "off", "touchscreen" (fingers go to the computer as multitouch) or "gestures"
+    /// (finger taps trigger shortcuts on the iPad side).
+    @Published var touchMode: String { didSet { save(touchMode, "touchMode") } }
+    @Published var twoFingerTap: String { didSet { save(twoFingerTap, "twoFingerTap") } }
+    @Published var threeFingerTap: String { didSet { save(threeFingerTap, "threeFingerTap") } }
+    /// "left", "right" or "hidden"
+    @Published var barSide: String { didSet { save(barSide, "barSide") } }
+    @Published var controls: [ControlButton] {
+        didSet {
+            if let data = try? JSONEncoder().encode(controls) { save(data, "controls") }
+        }
+    }
+
     // Pencil Pro gestures
     @Published var tapShortcut: String { didSet { save(tapShortcut, "tapShortcut") } }
     @Published var squeezeShortcut: String { didSet { save(squeezeShortcut, "squeezeShortcut") } }
@@ -62,6 +76,13 @@ final class Prefs: ObservableObject {
         showCursor = d.object(forKey: "showCursor") as? Bool ?? true
         qualityQP = d.object(forKey: "qualityQP") as? Int ?? 18
         sharpUpscaling = d.object(forKey: "sharpUpscaling") as? Bool ?? true
+        touchMode = d.string(forKey: "touchMode") ?? "gestures"
+        twoFingerTap = d.string(forKey: "twoFingerTap") ?? "ctrl+z"
+        threeFingerTap = d.string(forKey: "threeFingerTap") ?? "ctrl+shift+z"
+        barSide = d.string(forKey: "barSide") ?? "left"
+        controls = d.data(forKey: "controls")
+            .flatMap { try? JSONDecoder().decode([ControlButton].self, from: $0) }
+            ?? ControlButton.defaults
         tapShortcut = d.string(forKey: "tapShortcut") ?? "e"
         squeezeShortcut = d.string(forKey: "squeezeShortcut") ?? "ctrl+z"
         squeezeHold = d.object(forKey: "squeezeHold") as? Bool ?? false
