@@ -10,6 +10,8 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
     private let client = WeylusClient.shared
     private let prefs = Prefs.shared
     private let areaLayer = CAShapeLayer()
+    /// Cursor drawn on the iPad at the Pencil's position when the laptop's cursor isn't in the video.
+    private let cursorLayer = CAShapeLayer()
     private let videoView = MetalVideoView()
     private let decoder = H264Decoder()
     private let bar = ShortcutBarView()
@@ -67,6 +69,18 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
         areaLayer.lineWidth = 1
         areaLayer.lineDashPattern = [6, 6]
         layer.addSublayer(areaLayer)
+
+        let r: CGFloat = 5
+        cursorLayer.path = UIBezierPath(ovalIn: CGRect(x: -r, y: -r, width: 2 * r, height: 2 * r)).cgPath
+        cursorLayer.fillColor = UIColor.clear.cgColor
+        cursorLayer.strokeColor = UIColor.white.cgColor
+        cursorLayer.lineWidth = 1.5
+        cursorLayer.shadowColor = UIColor.black.cgColor
+        cursorLayer.shadowOpacity = 0.9
+        cursorLayer.shadowRadius = 1
+        cursorLayer.shadowOffset = .zero
+        cursorLayer.isHidden = true
+        layer.addSublayer(cursorLayer)
 
         let hover = UIHoverGestureRecognizer(target: self, action: #selector(onHover(_:)))
         addGestureRecognizer(hover)
@@ -244,6 +258,7 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
             }
             client.send(out)
             lastPencilActivity = Date()
+            moveCursor(to: t.location(in: self))
         }
         for t in touches where fingers[ObjectIdentifier(t)] != nil {
             sendFinger(t, type: "pointermove", touching: true)
@@ -270,8 +285,21 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
         }
     }
 
+    private func moveCursor(to p: CGPoint?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if let p, !prefs.showCursor, prefs.showVideo, activeArea.contains(p) {
+            cursorLayer.position = p
+            cursorLayer.isHidden = false
+        } else {
+            cursorLayer.isHidden = true
+        }
+        CATransaction.commit()
+    }
+
     private func pencilBegan(_ t: UITouch) {
         guard activeTouch == nil else { return }
+        moveCursor(to: t.location(in: self))
         // A palm usually lands just before the Pencil does; drop any fingers still down.
         cancelFingers()
         activeTouch = t
@@ -334,6 +362,7 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
             hovering = true
             lastHover = s
             lastPencilActivity = Date()
+            moveCursor(to: g.location(in: self))
             client.send([s])
         case .ended, .cancelled:
             if hovering, var s = lastHover {
@@ -342,6 +371,7 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
                 client.send([s])
             }
             hovering = false
+            if activeTouch == nil { moveCursor(to: nil) }
         default:
             break
         }

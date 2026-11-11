@@ -77,7 +77,9 @@ final class Prefs: ObservableObject {
         hoverEnabled = d.object(forKey: "hoverEnabled") as? Bool ?? true
         showVideo = d.object(forKey: "showVideo") as? Bool ?? true
         frameRate = d.object(forKey: "frameRate") as? Int ?? 30
-        showCursor = d.object(forKey: "showCursor") as? Bool ?? true
+        // Off by default: the iPad draws its own cursor at the Pencil instantly, and cursor
+        // movement then doesn't cost any video frames.
+        showCursor = d.object(forKey: "showCursor") as? Bool ?? false
         qualityQP = d.object(forKey: "qualityQP") as? Int ?? 18
         upscaler = d.string(forKey: "upscaler") ?? Upscaler.metalfx.rawValue
         sharpness = d.object(forKey: "sharpness") as? Double ?? 0.25

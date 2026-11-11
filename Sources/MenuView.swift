@@ -132,14 +132,14 @@ struct MenuView: View {
                           label: String(format: "%.0f%%", prefs.sharpness * 100))
             }
             Toggle("Clean colour edges", isOn: $prefs.chromaGuide)
-            Toggle("Show mouse cursor", isOn: $prefs.showCursor)
+            Toggle("Laptop cursor in video", isOn: $prefs.showCursor)
             if let size = client.videoSize {
                 LabeledContent("Stream", value: "\(Int(size.width))×\(Int(size.height))")
             }
         } header: {
             Text("Video")
         } footer: {
-            Text("Higher quality looks sharper but uses more Wi-Fi bandwidth when the screen changes a lot. MetalFX is Apple's equivalent of FSR 1.0's upscaler; with sharpening it matches FSR 1.0's full pipeline. Integer keeps pixels perfectly square but may leave a border. \"Clean colour edges\" stops red/blue fringes around sharp edges. Turn the screen off to use the iPad as a plain drawing tablet.")
+            Text("Higher quality looks sharper but uses more Wi-Fi bandwidth when the screen changes a lot. MetalFX is Apple's equivalent of FSR 1.0's upscaler; with sharpening it matches FSR 1.0's full pipeline. Integer keeps pixels perfectly square but may leave a border. With the laptop cursor off, the iPad draws its own cursor at the Pencil with no delay, and moving it costs no video. \"Clean colour edges\" stops red/blue fringes around sharp edges. Turn the screen off to use the iPad as a plain drawing tablet.")
         }
         .onChange(of: prefs.showVideo) { client.updateVideoSettings() }
         .onChange(of: prefs.frameRate) { client.updateVideoSettings() }
