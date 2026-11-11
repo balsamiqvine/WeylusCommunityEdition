@@ -53,7 +53,20 @@ struct MenuView: View {
                     .foregroundStyle(statusColor)
                     .multilineTextAlignment(.trailing)
             }
-            if !client.capturables.isEmpty {
+            Picker("Mode", selection: $prefs.displayMode) {
+                Text("Mirror a screen").tag("mirror")
+                Text("Extend (second screen)").tag("extend")
+            }
+            .onChange(of: prefs.displayMode) { client.applyDisplayMode() }
+            if prefs.displayMode == "extend" {
+                Picker("UI size", selection: $prefs.extendScale) {
+                    Text("Large (2×, like iPad apps)").tag(2.0)
+                    Text("Medium (1.33×)").tag(1.33)
+                    Text("Small (1×, most space)").tag(1.0)
+                }
+                .onChange(of: prefs.extendScale) { client.updateVideoSettings() }
+            }
+            if prefs.displayMode == "mirror" && !client.capturables.isEmpty {
                 Picker("Screen", selection: Binding(
                     get: { client.selected ?? -1 },
                     set: { client.select($0) }
@@ -223,7 +236,7 @@ struct MenuView: View {
         case .disconnected: return "Not connected"
         case .connecting: return "Connecting…"
         case .connected: return "Connected, pick a screen"
-        case .ready: return "Live"
+        case .ready: return client.extending ? "Live (second screen)" : "Live"
         case .failed(let msg): return msg
         }
     }

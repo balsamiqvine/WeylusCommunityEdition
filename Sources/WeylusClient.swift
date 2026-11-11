@@ -73,8 +73,13 @@ final class WeylusClient: ObservableObject {
             switch state {
             case .ready:
                 self.status = .connected
-                self.sendRaw("\"GetCapturableList\"")
                 self.receive(on: c)
+                if Prefs.shared.displayMode == "extend" {
+                    // No screen list: listing screens makes GNOME show a share dialog.
+                    self.startExtend()
+                } else {
+                    self.sendRaw("\"GetCapturableList\"")
+                }
             case .waiting(let err):
                 self.status = .failed("Can't reach computer: \(err.localizedDescription)")
             case .failed(let err):
@@ -97,11 +102,54 @@ final class WeylusClient: ObservableObject {
         parser.reset()
         capturables = []
         selected = nil
+        extending = false
         status = .disconnected
+    }
+
+    // MARK: Extend mode (virtual display)
+
+    /// Pixel size of the area the virtual display should fill, kept up to date by the view.
+    var extendSize: CGSize? {
+        didSet {
+            if extending, extendSize != oldValue { startExtend() }
+        }
+    }
+    @Published private(set) var extending = false
+
+    /// Ask Weylus to create a virtual monitor at the iPad's resolution and stream it.
+    func startExtend() {
+        guard conn != nil, let size = extendSize, size.width >= 320, size.height >= 240 else { return }
+        let prefs = Prefs.shared
+        // even dimensions keep the encoder and every scale factor happy
+        let w = Int(size.width) / 2 * 2, h = Int(size.height) / 2 * 2
+        selected = nil
+        extending = true
+        sendRaw("""
+        {"Config":{"uinput_support":true,"capturable_id":0,"capture_cursor":\(prefs.showCursor),\
+        "max_width":\(w),"max_height":\(h),"client_name":"Pencil","frame_rate":\(prefs.frameRate),\
+        "keyframe_interval":\(Self.keyframeInterval),"quality_qp":\(prefs.qualityQP),\
+        "virtual_display":{"width":\(w),"height":\(h),"scale":\(prefs.extendScale)}}}
+        """)
+        sendRaw(prefs.showVideo ? "\"ResumeVideo\"" : "\"PauseVideo\"")
+        status = .ready
+    }
+
+    /// Switch between mirroring and extending while connected.
+    func applyDisplayMode() {
+        guard conn != nil else { return }
+        if Prefs.shared.displayMode == "extend" {
+            startExtend()
+        } else {
+            extending = false
+            selected = nil
+            status = .connected
+            sendRaw("\"GetCapturableList\"")
+        }
     }
 
     func select(_ index: Int) {
         guard index >= 0, index < capturables.count else { return }
+        extending = false
         selected = index
         Prefs.shared.capturableName = capturables[index]
         let prefs = Prefs.shared
@@ -129,8 +177,12 @@ final class WeylusClient: ObservableObject {
 
     /// Apply changed video settings (on/off, frame rate, cursor) to the running stream.
     func updateVideoSettings() {
-        guard isLive, let i = selected else { return }
-        select(i)
+        guard isLive else { return }
+        if extending {
+            startExtend()
+        } else if let i = selected {
+            select(i)
+        }
     }
 
     // MARK: Input

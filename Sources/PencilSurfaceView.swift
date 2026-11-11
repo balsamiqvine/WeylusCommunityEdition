@@ -184,6 +184,10 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        // In extend mode the virtual display is created to fill everything beside the bar.
+        let scale = window?.screen.scale ?? UIScreen.main.scale
+        let content = contentRect
+        client.extendSize = CGSize(width: (content.width * scale).rounded(), height: (content.height * scale).rounded())
         areaLayer.frame = bounds
         bar.isHidden = prefs.barSide == "hidden"
         bar.frame = prefs.barSide == "right"
