@@ -277,6 +277,8 @@ final class MetalVideoView: UIView {
         let outW = Int(target.width), outH = Int(target.height)
         var upscaler = settings.upscaler
         if upscaler == .metalfx && !isMetalFXSupported { upscaler = .lanczos }
+        // Native resolution (extend mode): copy pixels 1:1; upscaling or sharpening would only hurt.
+        if videoW == outW && videoH == outH { upscaler = .integer }
         prepareTextures(videoW: videoW, videoH: videoH, outW: outW, outH: outH, metalFX: upscaler == .metalfx)
         guard let rgbTexture, let scaledTexture, let cmd = queue.makeCommandBuffer() else { return }
 
