@@ -9,6 +9,7 @@ struct MenuView: View {
         NavigationStack {
             Form {
                 connection
+                video
                 pressure
                 smoothing
                 mapping
@@ -106,6 +107,28 @@ struct MenuView: View {
         }
     }
 
+    private var video: some View {
+        Section {
+            Toggle("Show screen", isOn: $prefs.showVideo)
+            Picker("Frame rate", selection: $prefs.frameRate) {
+                Text("15 fps").tag(15)
+                Text("30 fps").tag(30)
+                Text("60 fps").tag(60)
+            }
+            Toggle("Show mouse cursor", isOn: $prefs.showCursor)
+            if let size = client.videoSize {
+                LabeledContent("Stream", value: "\(Int(size.width))×\(Int(size.height))")
+            }
+        } header: {
+            Text("Video")
+        } footer: {
+            Text("Turn the screen off to use the iPad as a plain drawing tablet and save battery and laptop CPU. Higher frame rates cost more laptop CPU.")
+        }
+        .onChange(of: prefs.showVideo) { client.updateVideoSettings() }
+        .onChange(of: prefs.frameRate) { client.updateVideoSettings() }
+        .onChange(of: prefs.showCursor) { client.updateVideoSettings() }
+    }
+
     private var mapping: some View {
         Section {
             Picker("Computer screen shape", selection: $prefs.aspect) {
@@ -119,7 +142,7 @@ struct MenuView: View {
         } header: {
             Text("Mapping")
         } footer: {
-            Text("Matching your screen's shape keeps circles round. The dashed box shows the active area.")
+            Text("While the screen is showing, the drawing area matches the video automatically. Without it, matching your screen's shape keeps circles round; the dashed box shows the active area.")
         }
     }
 

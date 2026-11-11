@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 import Network
 
@@ -19,6 +20,14 @@ final class WeylusClient: ObservableObject {
     @Published private(set) var selected: Int?
     /// Non-fatal error reported by the server (input keeps working).
     @Published private(set) var lastError: String?
+    /// Size of the incoming video in pixels, nil until the first stream starts.
+    @Published private(set) var videoSize: CGSize?
+
+    /// Receives decoded-ready video frames (set by the surface view).
+    var videoSink: ((CMSampleBuffer) -> Void)?
+    /// Called when a new video stream starts, so the view can drop the old picture.
+    var onVideoReset: (() -> Void)?
+    private let parser = FragmentedMP4Parser()
 
     private var conn: NWConnection?
     private let textContext = NWConnection.ContentContext(
@@ -28,8 +37,14 @@ final class WeylusClient: ObservableObject {
 
     var isLive: Bool { status == .ready }
 
+    private func setUpParser() {
+        parser.onFormat = { [weak self] size in self?.videoSize = size }
+        parser.onSample = { [weak self] sample in self?.videoSink?(sample) }
+    }
+
     func connect() {
         disconnect()
+        setUpParser()
         let prefs = Prefs.shared
         var comps = URLComponents()
         comps.scheme = "ws"
@@ -78,6 +93,8 @@ final class WeylusClient: ObservableObject {
         conn?.cancel()
         conn = nil
         lastError = nil
+        videoSize = nil
+        parser.reset()
         capturables = []
         selected = nil
         status = .disconnected
@@ -87,14 +104,20 @@ final class WeylusClient: ObservableObject {
         guard index >= 0, index < capturables.count else { return }
         selected = index
         Prefs.shared.capturableName = capturables[index]
+        let prefs = Prefs.shared
         let config = """
-        {"Config":{"uinput_support":true,"capturable_id":\(index),"capture_cursor":false,\
-        "max_width":1920,"max_height":1080,"client_name":"Pencil","frame_rate":30}}
+        {"Config":{"uinput_support":true,"capturable_id":\(index),"capture_cursor":\(prefs.showCursor),\
+        "max_width":1920,"max_height":1080,"client_name":"Pencil","frame_rate":\(prefs.frameRate)}}
         """
         sendRaw(config)
-        // Input only for now; the video stream comes later.
-        sendRaw("\"PauseVideo\"")
+        sendRaw(prefs.showVideo ? "\"ResumeVideo\"" : "\"PauseVideo\"")
         status = .ready
+    }
+
+    /// Apply changed video settings (on/off, frame rate, cursor) to the running stream.
+    func updateVideoSettings() {
+        guard isLive, let i = selected else { return }
+        select(i)
     }
 
     // MARK: Input
@@ -167,12 +190,14 @@ final class WeylusClient: ObservableObject {
                 switch meta.opcode {
                 case .text:
                     self.handle(text: data)
+                case .binary:
+                    self.parser.append(data)
                 case .close:
                     self.status = .failed("Weylus closed the connection")
                     self.conn = nil
                     return
                 default:
-                    break // binary = video, ignored for now
+                    break
                 }
             }
             self.receive(on: c)
@@ -181,6 +206,11 @@ final class WeylusClient: ObservableObject {
 
     private func handle(text data: Data) {
         guard let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else { return }
+        if let msg = obj as? String, msg == "NewVideo" {
+            parser.reset()
+            onVideoReset?()
+            return
+        }
         if let dict = obj as? [String: Any] {
             if let list = dict["CapturableList"] as? [String] {
                 capturables = list

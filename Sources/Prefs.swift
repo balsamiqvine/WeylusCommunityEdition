@@ -29,6 +29,11 @@ final class Prefs: ObservableObject {
     @Published var aspect: String { didSet { save(aspect, "aspect") } }
     @Published var hoverEnabled: Bool { didSet { save(hoverEnabled, "hoverEnabled") } }
 
+    // Video
+    @Published var showVideo: Bool { didSet { save(showVideo, "showVideo") } }
+    @Published var frameRate: Int { didSet { save(frameRate, "frameRate") } }
+    @Published var showCursor: Bool { didSet { save(showCursor, "showCursor") } }
+
     // Pencil Pro gestures
     @Published var tapShortcut: String { didSet { save(tapShortcut, "tapShortcut") } }
     @Published var squeezeShortcut: String { didSet { save(squeezeShortcut, "squeezeShortcut") } }
@@ -48,6 +53,9 @@ final class Prefs: ObservableObject {
         curves = d.object(forKey: "curves") as? Bool ?? true
         aspect = d.string(forKey: "aspect") ?? "16:9"
         hoverEnabled = d.object(forKey: "hoverEnabled") as? Bool ?? true
+        showVideo = d.object(forKey: "showVideo") as? Bool ?? true
+        frameRate = d.object(forKey: "frameRate") as? Int ?? 30
+        showCursor = d.object(forKey: "showCursor") as? Bool ?? true
         tapShortcut = d.string(forKey: "tapShortcut") ?? "e"
         squeezeShortcut = d.string(forKey: "squeezeShortcut") ?? "ctrl+z"
         squeezeHold = d.object(forKey: "squeezeHold") as? Bool ?? false

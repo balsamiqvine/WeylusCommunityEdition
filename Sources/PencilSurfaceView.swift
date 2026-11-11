@@ -10,6 +10,7 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
     private let client = WeylusClient.shared
     private let prefs = Prefs.shared
     private let areaLayer = CAShapeLayer()
+    private let videoView = VideoLayerView()
     private var activeTouch: UITouch?
     private var hovering = false
     private var lastHover: PenSample?
@@ -28,6 +29,10 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
     private func setup() {
         backgroundColor = .black
         isMultipleTouchEnabled = true
+
+        addSubview(videoView)
+        client.videoSink = { [weak self] sample in self?.videoView.enqueue(sample) }
+        client.onVideoReset = { [weak self] in self?.videoView.clear() }
 
         areaLayer.fillColor = UIColor.clear.cgColor
         areaLayer.strokeColor = UIColor(white: 1, alpha: 0.25).cgColor
@@ -48,9 +53,12 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
         menuTap.cancelsTouchesInView = false
         addGestureRecognizer(menuTap)
 
-        prefs.$aspect
-            .sink { [weak self] _ in DispatchQueue.main.async { self?.setNeedsLayout() } }
-            .store(in: &cancellables)
+        let relayout: (Any) -> Void = { [weak self] _ in
+            DispatchQueue.main.async { self?.setNeedsLayout() }
+        }
+        prefs.$aspect.sink(receiveValue: relayout).store(in: &cancellables)
+        prefs.$showVideo.sink(receiveValue: relayout).store(in: &cancellables)
+        client.$videoSize.sink(receiveValue: relayout).store(in: &cancellables)
     }
 
     @objc private func onMenuTap() {
@@ -59,11 +67,19 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
 
     // MARK: Mapping
 
+    /// Width / height of what's being mapped: the video if it's showing, else the manual setting.
+    private var targetAspect: Double? {
+        if prefs.showVideo, let v = client.videoSize, v.width > 0, v.height > 0 {
+            return Double(v.width / v.height)
+        }
+        return prefs.aspectRatio
+    }
+
     /// The part of the iPad that maps onto the computer's screen. Matching the screen's shape
     /// keeps circles round; the rest of the iPad is dead space.
     private var activeArea: CGRect {
         let b = bounds
-        guard let a = prefs.aspectRatio, b.width > 0, b.height > 0 else { return b }
+        guard let a = targetAspect, b.width > 0, b.height > 0 else { return b }
         if b.width / b.height > a {
             let w = b.height * a
             return CGRect(x: b.midX - w / 2, y: b.minY, width: w, height: b.height)
@@ -77,7 +93,13 @@ final class PencilSurfaceView: UIView, UIPencilInteractionDelegate {
         super.layoutSubviews()
         areaLayer.frame = bounds
         let area = activeArea
-        areaLayer.path = area == bounds ? nil : UIBezierPath(rect: area.insetBy(dx: 0.5, dy: 0.5)).cgPath
+        let videoShowing = prefs.showVideo && client.videoSize != nil
+        videoView.frame = area
+        videoView.isHidden = !prefs.showVideo
+        // The video itself shows where the screen is; only outline the area without it.
+        areaLayer.path = area == bounds || videoShowing
+            ? nil
+            : UIBezierPath(rect: area.insetBy(dx: 0.5, dy: 0.5)).cgPath
     }
 
     private func normalized(_ p: CGPoint) -> (Double, Double) {
